@@ -1,0 +1,24 @@
+# execution-service/requirements.txt
+#
+# Python dependencies for the code execution sandbox.
+# These are pre-installed in the Docker image so the LLM
+# doesn't waste time on `pip install` during analysis.
+
+# ── Server ───────────────────────────────────────────
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+
+# ── Data Science ─────────────────────────────────────
+pandas>=2.2
+numpy>=1.26
+scipy>=1.14
+scikit-learn>=1.5
+lifelines>=0.29
+
+# ── Visualization ────────────────────────────────────
+plotly>=5.24
+matplotlib>=3.9
+seaborn>=0.13
+
+# ── File Format Support ──────────────────────────────
+openpyxl>=3.1

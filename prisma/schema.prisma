@@ -1,0 +1,98 @@
+// Prisma schema for DataChat
+// AI-powered data analysis platform for biological research
+//
+// Models:
+//   Session      - A user's analysis workspace (contains messages + files)
+//   Message      - Individual chat turns (user questions + AI responses)
+//   UploadedFile - Dataset metadata (schema, path, stats)
+//   Checkpoint   - Saved conversation snapshots for version control
+
+// In Prisma 7, the connection URL lives in prisma.config.ts (not here).
+// See prisma.config.ts for the DATABASE_URL configuration.
+datasource db {
+  provider = "postgresql"
+}
+
+// Prisma 7 uses "prisma-client" with an explicit output path
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+// ─── Session ────────────────────────────────────────────────────────────────
+// A session is the top-level workspace. Users upload files and chat within it.
+// Sessions are isolated — one session cannot access another session's data.
+model Session {
+  id         String   @id @default(uuid())
+  name       String                         // Human-readable name (e.g. "TCGA Breast Cancer Analysis")
+  createdAt  DateTime @default(now())
+  lastActive DateTime @updatedAt             // Auto-updated on save — used for session sorting
+
+  messages      Message[]
+  uploadedFiles UploadedFile[]
+  checkpoints   Checkpoint[]
+
+  @@index([lastActive])                      // Query sessions by most recently active
+}
+
+// ─── Message ─────────────────────────────────────────────────────────────────
+// Every turn in the conversation, both user and AI.
+// The `metadata` JSON field stores structured execution results (code, outputs, artifacts).
+model Message {
+  id        Int      @id @default(autoincrement())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  role      String   // "user" | "assistant"
+  content   String   @db.Text               // The raw text content of the message
+
+  // Optional structured metadata for messages containing code execution results:
+  //   { type: "execution", exitCode: 0, stdout: "...", stderr: "...", artifacts: ["plot.html"] }
+  metadata  Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([sessionId, createdAt])            // Fast retrieval of ordered conversation history
+}
+
+// ─── UploadedFile ─────────────────────────────────────────────────────────
+// Dataset uploaded by the user. We store the schema (column names/types/stats)
+// so the LLM can reason about the data without loading the full file every time.
+model UploadedFile {
+  id        String   @id @default(uuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  filename  String
+  filePath  String                           // Absolute path to the saved file on disk
+  fileSize  BigInt                           // Size in bytes
+  fileType  String                           // MIME type (text/csv, application/vnd.openxmlformats...)
+
+  // Inferred schema stored as JSON:
+  //   { columns: { col_name: { type, missingCount, uniqueCount, sampleValues } }, rowCount }
+  schema    Json
+
+  uploadedAt DateTime @default(now())
+
+  @@index([sessionId])
+}
+
+// ─── Checkpoint ──────────────────────────────────────────────────────────────
+// A checkpoint is a snapshot of the conversation at a specific point in time.
+// Users can restore to any checkpoint to backtrack and try a different approach.
+// The actual message snapshot lives on disk (checkpoints/<id>/conversation.json).
+model Checkpoint {
+  id          String   @id @default(uuid())
+  sessionId   String
+  session     Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  name        String                         // User-supplied label (e.g. "PCA + k-means, silhouette=0.58 ⭐")
+  description String?                        // Optional longer notes
+
+  // Path to snapshot directory containing conversation.json and output artifacts
+  snapshotPath String
+
+  createdAt   DateTime @default(now())
+
+  @@index([sessionId, createdAt])
+}

@@ -1,0 +1,53 @@
+# docker-compose.yml
+#
+# Local development environment for DataChat.
+#
+# Services:
+#   db         — PostgreSQL 15 (persistent volume)
+#   execution  — Python code execution sandbox (FastAPI)
+#
+# Usage:
+#   docker compose up -d              # start all services
+#   npx prisma migrate dev            # apply schema migrations
+#   npm run dev                       # start Next.js
+
+version: "3.9"
+
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: datachat
+    ports:
+      - "5432:5432"            # Expose locally so Prisma can connect
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # ── Python Execution Service ────────────────────────────────────────────────
+  # Sandboxed environment for running LLM-generated Python code.
+  # Security: non-root user, memory/PID limits, no internet access.
+  # Note on networking: In local dev, the execution service is on the default
+  # network so Next.js (running on host) can reach it via localhost:8000.
+  # In production, use an internal-only network to block internet access.
+  execution:
+    build:
+      context: ./execution-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"           # Expose locally so Next.js can connect
+    volumes:
+      - ./uploads:/uploads:rw  # Session data files accessible to Python
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          pids: 64
+
+volumes:
+  postgres_data:
+    driver: local

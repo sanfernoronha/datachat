@@ -24,3 +24,9 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Make input placeholder text visible across all browsers */
+::placeholder {
+  color: #9ca3af; /* gray-400 */
+  opacity: 1;    /* Firefox reduces opacity by default */
+}
