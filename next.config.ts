@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // ── Standalone output ────────────────────────────────────────────────────
+  // Produces a minimal self-contained build for Docker deployments.
+  output: "standalone",
+
   // ── API body size limit ────────────────────────────────────────────────────
   // Next.js defaults to 4 MB for API route bodies. We increase this to allow
   // CSV/XLSX uploads up to 100 MB. Actual enforcement is done in the upload

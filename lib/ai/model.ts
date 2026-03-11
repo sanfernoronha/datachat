@@ -34,7 +34,9 @@ export function getModel() {
 
   switch (provider) {
     case "openai":
-      return createOpenAI({ apiKey: process.env.OPENAI_API_KEY })(name);
+      // Use .chat() to force Chat Completions API — the default Responses API
+      // can be unreliable with multi-step tool calling.
+      return createOpenAI({ apiKey: process.env.OPENAI_API_KEY }).chat(name);
 
     case "google":
       return createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY })(name);

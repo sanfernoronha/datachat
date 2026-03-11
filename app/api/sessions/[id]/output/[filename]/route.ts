@@ -17,9 +17,12 @@ const CONTENT_TYPES: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
   ".svg": "image/svg+xml",
   ".csv": "text/csv",
   ".json": "application/json",
+  ".pdf": "application/pdf",
 };
 
 export async function GET(

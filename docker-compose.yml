@@ -1,19 +1,39 @@
 # docker-compose.yml
 #
-# Local development environment for DataChat.
-#
-# Services:
-#   db         — PostgreSQL 15 (persistent volume)
-#   execution  — Python code execution sandbox (FastAPI)
+# Full-stack DataChat environment.
 #
 # Usage:
-#   docker compose up -d              # start all services
-#   npx prisma migrate dev            # apply schema migrations
-#   npm run dev                       # start Next.js
-
-version: "3.9"
+#   1. Copy .env.example to .env and fill in your API keys
+#   2. docker compose up              # start everything
+#
+# Services:
+#   app     — Next.js application (port 3000)
+#   db      — PostgreSQL 15 (port 5432)
+#   sandbox — AIO Sandbox for code execution (port 8888)
 
 services:
+  # ── Next.js App ──────────────────────────────────────────────────────────────
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # These override .env values to use Docker service names instead of localhost
+      DATABASE_URL: "postgresql://postgres:password@db:5432/datachat?schema=public"
+      SANDBOX_URL: "http://sandbox:8080"
+      NODE_ENV: production
+    env_file:
+      - .env      # API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)
+    volumes:
+      - uploads_data:/app/uploads
+      - checkpoints_data:/app/checkpoints
+    depends_on:
+      db:
+        condition: service_healthy
+      sandbox:
+        condition: service_started
+
   # ── PostgreSQL ──────────────────────────────────────────────────────────────
   db:
     image: postgres:15-alpine
@@ -23,31 +43,37 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: datachat
     ports:
-      - "5432:5432"            # Expose locally so Prisma can connect
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  # ── Python Execution Service ────────────────────────────────────────────────
-  # Sandboxed environment for running LLM-generated Python code.
-  # Security: non-root user, memory/PID limits, no internet access.
-  # Note on networking: In local dev, the execution service is on the default
-  # network so Next.js (running on host) can reach it via localhost:8000.
-  # In production, use an internal-only network to block internet access.
-  execution:
-    build:
-      context: ./execution-service
-      dockerfile: Dockerfile
+  # ── AIO Sandbox ───────────────────────────────────────────────────────────
+  # All-in-one sandbox: Jupyter kernel, shell, file system, browser.
+  # Docs: https://github.com/agent-infra/sandbox
+  sandbox:
+    image: ghcr.io/agent-infra/sandbox:latest
     restart: unless-stopped
+    security_opt:
+      - seccomp=unconfined
     ports:
-      - "8000:8000"           # Expose locally so Next.js can connect
-    volumes:
-      - ./uploads:/uploads:rw  # Session data files accessible to Python
+      - "8888:8080"
+    shm_size: "2gb"
+    environment:
+      - DISABLE_CODE_SERVER=true
     deploy:
       resources:
         limits:
-          memory: 2G
-          pids: 64
+          memory: 4G
 
 volumes:
   postgres_data:
+    driver: local
+  uploads_data:
+    driver: local
+  checkpoints_data:
     driver: local

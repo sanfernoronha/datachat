@@ -2,23 +2,28 @@
 // app/sessions/[id]/session-workspace.tsx
 //
 // Client-side orchestrator for the three-panel session workspace.
-// Manages local state for files, checkpoints, and the checkpoint creation modal.
+// Layout: Files (left) | Notebook (center) | Chat + Checkpoints (right)
 //
-// Props come from the server component (page.tsx) as pre-fetched data,
-// so the page renders with full content immediately — no loading skeleton.
+// useChat() is lifted here so both NotebookView and ChatPanel share the
+// same message stream. The notebook is the primary workspace; chat is the
+// assistant panel.
 
-import { useState } from "react";
+import { useState, useRef } from "react";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
 import type { UIMessage } from "ai";
-import ChatInterface from "@/components/chat/chat-interface";
+import ChatPanel from "@/components/chat/chat-interface";
+import NotebookView from "@/components/notebook/notebook-view";
 import FileDropzone from "@/components/upload/file-dropzone";
 import CheckpointPanel from "@/components/session/checkpoint-panel";
+import DataQualityBanner from "@/components/data/data-quality-banner";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface FileRecord {
   id: string;
   filename: string;
-  fileSize: number;   // Converted from BigInt in page.tsx
+  fileSize: number;
   fileType: string;
   schema: unknown;
   uploadedAt: string;
@@ -46,20 +51,30 @@ export default function SessionWorkspace({
   initialMessages,
   initialCheckpoints,
 }: SessionWorkspaceProps) {
-  // Local state mirrors the DB — updated optimistically after uploads/checkpoints
   const [files, setFiles] = useState<FileRecord[]>(initialFiles);
   const [checkpoints, setCheckpoints] = useState<CheckpointRecord[]>(initialCheckpoints);
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false);
+  const [cellAttachment, setCellAttachment] = useState<number | null>(null);
 
-  // Called by FileDropzone after a successful upload
+  // Ref for sending prompts from sidebar actions
+  const sendPromptRef = useRef<(text: string) => void>(() => {});
+
+  // Lift useChat() here so notebook + chat share the same message stream
+  const { messages, sendMessage, stop, status, error } = useChat({
+    transport: new DefaultChatTransport({
+      api: `/api/sessions/${sessionId}/chat`,
+    }),
+    messages: initialMessages,
+  });
+
   function handleUploadSuccess(result: {
     filename: string;
     rowCount: number;
     columnCount: number;
     schema: unknown;
   }) {
-    // Optimistically add the file card — schema is the same shape the server returns
     const newFile: FileRecord = {
-      id: crypto.randomUUID(), // Placeholder — actual ID lives in DB
+      id: crypto.randomUUID(),
       filename: result.filename,
       fileSize: 0,
       fileType: "",
@@ -69,12 +84,10 @@ export default function SessionWorkspace({
     setFiles((prev) => [...prev, newFile]);
   }
 
-  // Called by CheckpointPanel after saving a checkpoint
   function handleCheckpointCreated(checkpoint: CheckpointRecord) {
     setCheckpoints((prev) => [...prev, checkpoint]);
   }
 
-  // Called by FileCard to delete an uploaded file
   async function handleDeleteFile(fileId: string) {
     const res = await fetch(`/api/sessions/${sessionId}/files/${fileId}`, { method: "DELETE" });
     if (res.ok) {
@@ -85,50 +98,90 @@ export default function SessionWorkspace({
   return (
     <>
       {/* ── Left Sidebar: Files ──────────────────────────────────────────── */}
-      <aside className="w-64 shrink-0 overflow-y-auto border-r bg-white px-4 py-5">
+      <aside className="w-56 shrink-0 overflow-y-auto border-r bg-white px-4 py-5">
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
           Datasets
         </h2>
-
-        {/* Upload dropzone */}
         <FileDropzone
           sessionId={sessionId}
           onUploadSuccess={handleUploadSuccess}
         />
-
-        {/* File cards */}
         <ul className="mt-4 space-y-2">
           {files.map((file) => (
             <FileCard key={file.id} file={file} onDelete={handleDeleteFile} />
           ))}
         </ul>
+        {files.length > 0 && (
+          <DataQualityBanner
+            files={files}
+            onAskClean={(prompt) => sendPromptRef.current(prompt)}
+          />
+        )}
       </aside>
 
-      {/* ── Center: Chat ─────────────────────────────────────────────────── */}
-      <main className="flex flex-1 flex-col overflow-hidden">
-        <ChatInterface
+      {/* ── Center: Notebook ─────────────────────────────────────────────── */}
+      <main className="flex flex-1 flex-col overflow-hidden bg-white">
+        <NotebookView
+          messages={messages}
           sessionId={sessionId}
-          initialMessages={initialMessages}
+          status={status}
+          onAskAI={(cellNumber) => {
+            setCellAttachment(cellNumber);
+            sendPromptRef.current("Explain and suggest improvements");
+          }}
         />
       </main>
 
-      {/* ── Right Sidebar: Checkpoints ────────────────────────────────────── */}
-      <aside className="w-64 shrink-0 overflow-y-auto border-l bg-white px-4 py-5">
-        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
-          Checkpoints
-        </h2>
-        <CheckpointPanel
-          sessionId={sessionId}
-          checkpoints={checkpoints}
-          onCheckpointCreated={handleCheckpointCreated}
-        />
+      {/* ── Right Sidebar: Chat + Checkpoints ────────────────────────────── */}
+      <aside className="w-[32rem] shrink-0 flex flex-col border-l bg-white">
+        {/* Chat panel */}
+        <div className="flex-1 overflow-hidden flex flex-col">
+          <div className="px-3 py-2 border-b bg-gray-50">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+              AI Assistant
+            </h2>
+          </div>
+          <ChatPanel
+            sessionId={sessionId}
+            messages={messages}
+            status={status}
+            error={error}
+            sendMessage={sendMessage}
+            stop={stop}
+            files={files}
+            onSendPromptRef={sendPromptRef}
+            cellAttachment={cellAttachment}
+            onClearCellAttachment={() => setCellAttachment(null)}
+          />
+        </div>
+
+        {/* Checkpoints — collapsible at bottom */}
+        <div className="border-t">
+          <button
+            onClick={() => setCheckpointsOpen(!checkpointsOpen)}
+            className="w-full px-3 py-2 flex items-center justify-between bg-gray-50 hover:bg-gray-100 transition-colors"
+          >
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+              Checkpoints ({checkpoints.length})
+            </h2>
+            <span className="text-xs text-gray-400">{checkpointsOpen ? "▾" : "▸"}</span>
+          </button>
+          {checkpointsOpen && (
+            <div className="px-3 py-2 max-h-48 overflow-y-auto">
+              <CheckpointPanel
+                sessionId={sessionId}
+                checkpoints={checkpoints}
+                onCheckpointCreated={handleCheckpointCreated}
+              />
+            </div>
+          )}
+        </div>
       </aside>
     </>
   );
 }
 
 // ─── FileCard ─────────────────────────────────────────────────────────────────
-// A small card that summarises an uploaded dataset.
 
 function FileCard({ file, onDelete }: { file: FileRecord; onDelete: (id: string) => void }) {
   const [confirming, setConfirming] = useState(false);
@@ -140,11 +193,11 @@ function FileCard({ file, onDelete }: { file: FileRecord; onDelete: (id: string)
     <li className="rounded-lg border bg-gray-50 px-3 py-2.5 text-sm group relative">
       <div className="flex items-start justify-between">
         <div className="min-w-0 flex-1">
-          <p className="font-medium text-gray-800 truncate" title={file.filename}>
+          <p className="font-medium text-gray-800 truncate text-xs" title={file.filename}>
             {file.filename}
           </p>
-          <p className="mt-0.5 text-xs text-gray-400">
-            {rowCount.toLocaleString()} rows · {columnCount} columns
+          <p className="mt-0.5 text-[10px] text-gray-400">
+            {rowCount.toLocaleString()} rows · {columnCount} cols
           </p>
         </div>
         {!confirming && (

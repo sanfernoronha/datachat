@@ -14,6 +14,7 @@ import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { prisma } from "@/lib/db/prisma";
 import { saveUploadedFile } from "@/lib/storage/files";
+import { uploadFile } from "@/lib/sandbox/client";
 
 // Allowed MIME types — anything else is rejected
 const ALLOWED_MIME_TYPES = new Set([
@@ -78,8 +79,15 @@ export async function POST(
   // Infer column-level statistics from the parsed rows
   const schema = inferSchema(rows);
 
-  // Save the raw file to disk (inside the session's data/ directory)
+  // Save the raw file to disk (for local schema inference)
   const filePath = await saveUploadedFile(sessionId, file.name, buffer);
+
+  // Upload to the sandbox so the Jupyter kernel can access it
+  try {
+    await uploadFile(sessionId, file.name, buffer);
+  } catch (err) {
+    console.warn("Failed to upload file to sandbox (will retry on first code execution):", err);
+  }
 
   // Persist file metadata to the database
   await prisma.uploadedFile.create({

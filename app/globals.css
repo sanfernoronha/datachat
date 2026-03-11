@@ -30,3 +30,54 @@ body {
   color: #9ca3af; /* gray-400 */
   opacity: 1;    /* Firefox reduces opacity by default */
 }
+
+/* ── Custom scrollbars ─────────────────────────────────────────────────────── */
+
+/* Webkit (Chrome, Safari, Edge) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db; /* gray-300 */
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af; /* gray-400 */
+}
+
+/* Hide scrollbar until hover on scrollable containers */
+.overflow-y-auto,
+.overflow-x-auto {
+  scrollbar-gutter: stable;
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d1d5db transparent;
+}
+
+/* CodeMirror scrollbars */
+.CodeMirror-vscrollbar::-webkit-scrollbar,
+.CodeMirror-hscrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.CodeMirror-vscrollbar::-webkit-scrollbar-thumb,
+.CodeMirror-hscrollbar::-webkit-scrollbar-thumb {
+  background: #4b5563; /* gray-600 — visible on dark editor bg */
+  border-radius: 3px;
+}
+
+.CodeMirror-vscrollbar::-webkit-scrollbar-track,
+.CodeMirror-hscrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}

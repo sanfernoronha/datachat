@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@agent-infra/sandbox": "^1.0.12",
     "@ai-sdk/anthropic": "^3.0.47",
     "@ai-sdk/google": "^3.0.33",
     "@ai-sdk/openai": "^3.0.36",
@@ -16,12 +17,15 @@
     "@anthropic-ai/sdk": "^0.78.0",
     "@prisma/adapter-pg": "^7.4.1",
     "@prisma/client": "^7.4.1",
+    "@types/codemirror": "^5.60.17",
     "ai": "^6.0.103",
+    "codemirror": "^5.65.21",
     "next": "16.1.6",
     "papaparse": "^5.5.3",
     "pg": "^8.19.0",
     "prisma": "^7.4.1",
     "react": "19.2.3",
+    "react-codemirror2": "^9.0.1",
     "react-dom": "19.2.3",
     "react-markdown": "^10.1.0",
     "xlsx": "^0.18.5",

@@ -52,8 +52,8 @@ export default async function SessionPage({ params }: SessionPageProps) {
   // Reconstruct rich parts from metadata (tool invocations with code/results/plots).
   interface ToolMeta {
     toolName: string;
-    input: { code?: string };
-    output: { exit_code?: number; stdout?: string; stderr?: string; plot_filenames?: string[] };
+    input: { code?: string; package?: string };
+    output: Record<string, unknown>;
   }
 
   const safeMessages = session.messages.map((m) => {
@@ -64,9 +64,13 @@ export default async function SessionPage({ params }: SessionPageProps) {
     // Reconstruct tool invocation parts from saved metadata
     if (m.role === "assistant" && meta?.tools?.length) {
       for (const tool of meta.tools) {
+        const partType = tool.toolName === "install_package"
+          ? "tool-install_package"
+          : "tool-execute_python";
         parts.push({
-          type: "tool-execute_python",
+          type: partType,
           toolCallId: `restored-${m.id}-${parts.length}`,
+          toolName: tool.toolName,
           state: "output-available",
           input: tool.input,
           output: tool.output,

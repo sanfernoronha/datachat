@@ -6,18 +6,21 @@
 //   1. Loads the session + conversation history + uploaded file schemas
 //   2. Appends the new user message to the DB
 //   3. Streams the LLM response back to the browser via the Vercel AI SDK
-//   4. When the LLM calls execute_python, POSTs code to the execution service
-//   5. Returns execution results to the LLM for interpretation
+//   4. When the LLM calls execute_python, runs code in the AIO Sandbox Jupyter kernel
+//   5. Returns execution results (rich MIME outputs) to the frontend
 //   6. Saves the completed assistant response to the DB once streaming finishes
-//
-// Uses AI SDK tool calling so the LLM can run Python code autonomously.
-// stopWhen + stepCountIs allows multi-turn tool use (run code → see result → run more).
 
 import { NextRequest } from "next/server";
 import { streamText, tool, jsonSchema, stepCountIs } from "ai";
 import { prisma } from "@/lib/db/prisma";
 import { buildSystemPrompt } from "@/lib/ai/prompts";
 import { getModel } from "@/lib/ai/model";
+import {
+  executeCode,
+  installPackage,
+  toLLMSummary,
+  saveOutputFiles,
+} from "@/lib/sandbox/client";
 
 // ─── POST ──────────────────────────────────────────────────────────────────────
 
@@ -27,9 +30,6 @@ export async function POST(
 ) {
   const { id: sessionId } = await params;
 
-  // Body sent by AI SDK v6 useChat:
-  //   { id, messages: UIMessage[], trigger, messageId }
-  // UIMessage uses parts[] instead of a content string.
   const body = await req.json();
   const clientMessages: Array<{
     role: string;
@@ -39,7 +39,6 @@ export async function POST(
 
   const lastUserMsg = [...clientMessages].reverse().find((m) => m.role === "user");
 
-  // Support both UIMessage (parts[]) and CoreMessage (content string)
   let message: string | undefined;
   if (lastUserMsg) {
     if (Array.isArray(lastUserMsg.parts)) {
@@ -57,7 +56,6 @@ export async function POST(
     return new Response("Message cannot be empty", { status: 400 });
   }
 
-  // Load the full session with history and file schemas
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
     include: {
@@ -70,34 +68,65 @@ export async function POST(
     return new Response("Session not found", { status: 404 });
   }
 
-  // Persist the user's message BEFORE streaming
   await prisma.message.create({
     data: { sessionId, role: "user", content: message },
   });
 
   // Build conversation history for the LLM.
-  // For assistant messages with tool metadata, reconstruct the full context
-  // (code executed, stdout, stderr, plots) so the LLM remembers what it did.
+  // Supports both legacy (plot_filenames) and new (results) metadata formats.
   interface ToolMeta {
     toolName: string;
-    input: { code?: string };
-    output: { exit_code?: number; stdout?: string; stderr?: string; plot_filenames?: string[] };
+    input: { code?: string; package?: string };
+    output: {
+      // Legacy format
+      exit_code?: number;
+      stdout?: string;
+      stderr?: string;
+      plot_filenames?: string[];
+      // New sandbox format (LLM summary)
+      status?: string;
+      has_plots?: boolean;
+      has_tables?: boolean;
+      result_count?: number;
+      error?: string;
+      // install_package format
+      success?: boolean;
+      output?: string;
+    };
   }
 
   const conversationHistory = session.messages.map((m) => {
     const meta = m.metadata as { tools?: ToolMeta[] } | null;
 
-    // For assistant messages with tool calls, include execution context
     if (m.role === "assistant" && meta?.tools?.length) {
-      const toolSummaries = meta.tools.map((t) => {
-        const parts = [`[Code executed]\n${t.input?.code ?? ""}`];
-        if (t.output?.stdout) parts.push(`[Output]\n${t.output.stdout.slice(0, 3000)}`);
-        if (t.output?.stderr) parts.push(`[Error]\n${t.output.stderr.slice(0, 1000)}`);
-        if (t.output?.plot_filenames?.length) {
-          parts.push(`[Plots saved: ${t.output.plot_filenames.join(", ")}]`);
-        }
-        return parts.join("\n");
-      }).join("\n\n");
+      const toolSummaries = meta.tools
+        .map((t) => {
+          if (t.toolName === "install_package") {
+            return `[Installed package: ${t.input?.package}] ${t.output?.success ? "Success" : "Failed"}`;
+          }
+
+          const parts = [`[Code executed]\n${t.input?.code ?? ""}`];
+
+          // New format
+          if (t.output?.status !== undefined) {
+            if (t.output?.stdout) parts.push(`[Output]\n${t.output.stdout.slice(0, 3000)}`);
+            if (t.output?.stderr) parts.push(`[Error]\n${t.output.stderr.slice(0, 1000)}`);
+            if (t.output?.has_plots) parts.push(`[Charts generated]`);
+            if (t.output?.has_tables) parts.push(`[Tables rendered]`);
+            if (t.output?.error) parts.push(`[Error: ${t.output.error}]`);
+          }
+          // Legacy format
+          else {
+            if (t.output?.stdout) parts.push(`[Output]\n${t.output.stdout.slice(0, 3000)}`);
+            if (t.output?.stderr) parts.push(`[Error]\n${t.output.stderr.slice(0, 1000)}`);
+            if (t.output?.plot_filenames?.length) {
+              parts.push(`[Plots saved: ${t.output.plot_filenames.join(", ")}]`);
+            }
+          }
+
+          return parts.join("\n");
+        })
+        .join("\n\n");
 
       return {
         role: "assistant" as const,
@@ -111,28 +140,20 @@ export async function POST(
     };
   });
 
-  // Stream the LLM response with tool use support
   const result = streamText({
     model: getModel(),
     system: buildSystemPrompt(session.uploadedFiles),
-    messages: [
-      ...conversationHistory,
-      { role: "user", content: message },
-    ],
+    messages: [...conversationHistory, { role: "user", content: message }],
     maxOutputTokens: 4096,
-
-    // Allow up to 5 tool-call rounds per request.
-    // This lets the LLM: run code → see result → fix errors → run again.
-    // AI SDK v6 replaced maxSteps with stopWhen + stepCountIs.
-    stopWhen: stepCountIs(5),
+    stopWhen: stepCountIs(10),
 
     tools: {
       execute_python: tool({
         description:
-          "Execute Python code for data analysis. The environment persists " +
-          "variables across calls (like Jupyter). Pre-imported: pandas as pd, " +
-          "numpy as np, matplotlib.pyplot as plt. Use DATA_DIR to read files " +
-          "and OUTPUT_DIR to save outputs.",
+          "Execute Python code in a Jupyter kernel. You MUST use this tool for any data analysis, " +
+          "computation, or visualization request. Variables persist across calls. " +
+          "Pre-imported: pandas as pd, numpy as np, matplotlib.pyplot as plt, plotly.express as px, plotly.graph_objects as go. " +
+          "Use DATA_DIR to access uploaded files. If execution fails, fix the code and call again.",
         inputSchema: jsonSchema({
           type: "object" as const,
           properties: {
@@ -142,55 +163,76 @@ export async function POST(
           additionalProperties: false,
         }),
         execute: async ({ code }) => {
-          try {
-            const res = await fetch(
-              `${process.env.EXECUTION_SERVICE_URL}/execute`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ session_id: sessionId, code }),
-              }
-            );
+          // Retry transient sandbox errors (connection issues, kernel restarts)
+          let execResult = await executeCode(sessionId, code);
 
-            if (!res.ok) {
-              return {
-                exit_code: 1,
-                stdout: "",
-                stderr: `Execution service error: ${res.status} ${res.statusText}`,
-                plot_filenames: [] as string[],
-              };
-            }
-
-            const data = await res.json();
-
-            // Return lean result to LLM (plots are saved to disk, referenced by filename)
-            return {
-              exit_code: data.exit_code,
-              stdout: data.stdout?.slice(0, 10_000) ?? "",
-              stderr: data.stderr?.slice(0, 5_000) ?? "",
-              plot_filenames: data.plot_filenames ?? [],
-            };
-          } catch (err) {
-            return {
-              exit_code: 1,
-              stdout: "",
-              stderr: `Failed to reach execution service: ${err}`,
-              plot_filenames: [] as string[],
-            };
+          // If we got a sandbox-level error (not a Python error), retry once
+          const isTransientError =
+            execResult.status === "error" &&
+            !execResult.error && // no Python exception — it's a sandbox/connection issue
+            execResult.stderr.includes("sandbox");
+          if (isTransientError) {
+            console.log("[sandbox] Transient error, retrying:", execResult.stderr.slice(0, 200));
+            execResult = await executeCode(sessionId, code);
           }
+
+          console.log("[sandbox] status:", execResult.status);
+          if (execResult.stdout) console.log("[sandbox] stdout:", execResult.stdout.slice(0, 200));
+          if (execResult.stderr) console.log("[sandbox] stderr:", execResult.stderr.slice(0, 200));
+          if (execResult.error) console.log("[sandbox] error:", execResult.error.ename, execResult.error.evalue);
+
+          // Save images/Plotly to disk, extract inline tables
+          const { filenames, tables } = await saveOutputFiles(
+            sessionId,
+            execResult.results
+          );
+
+          const toolResult = {
+            ...toLLMSummary(execResult),
+            plot_filenames: filenames,
+            tables,
+          };
+
+          return toolResult;
+        },
+      }),
+
+      install_package: tool({
+        description:
+          "Install a Python package via pip. Use this when you need a package " +
+          "that is not pre-installed (e.g. seaborn, scikit-learn, lifelines, scipy).",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            package: {
+              type: "string",
+              description: "Package name to install (e.g. 'scikit-learn')",
+            },
+          },
+          required: ["package"],
+          additionalProperties: false,
+        }),
+        execute: async ({ package: pkg }) => {
+          return installPackage(sessionId, pkg);
         },
       }),
     },
 
-    // Save the assistant's response + tool invocations to the DB
     onFinish: async ({ text, steps }) => {
-      // Extract tool invocations (code + results) from all steps
       const toolParts = steps.flatMap((step) =>
-        step.toolResults.map((tr) => ({
-          toolName: tr.toolName,
-          input: tr.input,
-          output: tr.output,
-        }))
+        step.toolResults.map((tr) => {
+          const output = tr.output as Record<string, unknown>;
+
+          // tables[] can be large HTML — strip from DB, keep plot_filenames
+          const storageOutput = { ...output };
+          delete storageOutput.tables;
+
+          return {
+            toolName: tr.toolName,
+            input: tr.input,
+            output: storageOutput,
+          };
+        })
       );
 
       await prisma.message.create({
@@ -204,7 +246,5 @@ export async function POST(
     },
   });
 
-  // Use toUIMessageStreamResponse() which supports tool call/result parts.
-  // The frontend DefaultChatTransport reads this format.
   return result.toUIMessageStreamResponse();
 }
