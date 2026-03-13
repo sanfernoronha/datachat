@@ -74,22 +74,26 @@ model UploadedFile {
 
   uploadedAt DateTime @default(now())
 
+  @@unique([sessionId, filename])
   @@index([sessionId])
 }
 
 // ─── Checkpoint ──────────────────────────────────────────────────────────────
 // A checkpoint is a snapshot of the conversation at a specific point in time.
 // Users can restore to any checkpoint to backtrack and try a different approach.
-// The actual message snapshot lives on disk (checkpoints/<id>/conversation.json).
+// Messages are stored in the DB (messagesSnapshot); output artifacts live on disk.
 model Checkpoint {
   id          String   @id @default(uuid())
   sessionId   String
   session     Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
-  name        String                         // User-supplied label (e.g. "PCA + k-means, silhouette=0.58 ⭐")
+  name        String                         // User-supplied label (e.g. "PCA + k-means, silhouette=0.58")
   description String?                        // Optional longer notes
 
-  // Path to snapshot directory containing conversation.json and output artifacts
+  // Full message array at checkpoint time — stored in DB for multi-instance reliability
+  messagesSnapshot Json
+
+  // Path to snapshot directory containing output artifacts (plots, images, HTML)
   snapshotPath String
 
   createdAt   DateTime @default(now())

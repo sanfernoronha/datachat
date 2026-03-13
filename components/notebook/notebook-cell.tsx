@@ -10,7 +10,7 @@
 //   - Color-coded left border for status
 //   - Elapsed time counter while running
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, memo } from "react";
 import dynamic from "next/dynamic";
 import CellOutput, { type CellOutputData } from "./cell-output";
 
@@ -33,11 +33,12 @@ interface NotebookCellProps {
   autoCollapsed?: boolean; // auto-collapse error cells when AI retries
   onDelete?: () => void;
   onAskAI?: (cellNumber: number) => void;
+  onDebugError?: (code: string, error: string) => void;
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
 
-export default function NotebookCell({
+function NotebookCell({
   cellId,
   cellNumber,
   initialCode,
@@ -48,6 +49,7 @@ export default function NotebookCell({
   autoCollapsed = false,
   onDelete,
   onAskAI,
+  onDebugError,
 }: NotebookCellProps) {
   const [code, setCode] = useState(initialCode);
   const [isEdited, setIsEdited] = useState(false);
@@ -68,9 +70,11 @@ export default function NotebookCell({
     prevAutoCollapsed.current = autoCollapsed;
   }, [autoCollapsed]);
 
-  // Update code when streaming input changes
+  // Update code when streaming input changes — only if content actually changed
+  const prevInitialCode = useRef(initialCode);
   useEffect(() => {
-    if (!isEdited) {
+    if (!isEdited && initialCode !== prevInitialCode.current) {
+      prevInitialCode.current = initialCode;
       setCode(initialCode);
     }
   }, [initialCode, isEdited]);
@@ -137,6 +141,12 @@ export default function NotebookCell({
   const output = rerunOutput ?? initialOutput;
   const isSuccess = output?.status === "ok" || (output?.exit_code !== undefined && output.exit_code === 0);
   const hasError = output?.status === "error" || (output?.exit_code !== undefined && output.exit_code !== 0);
+
+  const handleDebugError = useCallback(() => {
+    if (!onDebugError) return;
+    const errorText = output?.error ?? output?.stderr ?? "Unknown error";
+    onDebugError(code, errorText);
+  }, [onDebugError, code, output]);
 
   // Subtle left border — only highlight problems
   const borderColor = isRunning || isStreaming
@@ -236,10 +246,18 @@ export default function NotebookCell({
               </span>
             )}
             {!isStreaming && !isRunning && output && isSuccess && (
-              <span className="text-xs text-green-500">✓</span>
+              <span className="text-xs text-green-500">
+                ✓{output.elapsed_ms != null && (
+                  <span className="ml-1 font-mono text-gray-400">{output.elapsed_ms >= 1000 ? `${(output.elapsed_ms / 1000).toFixed(1)}s` : `${output.elapsed_ms}ms`}</span>
+                )}
+              </span>
             )}
             {!isStreaming && !isRunning && output && hasError && (
-              <span className="text-xs text-red-500">✗</span>
+              <span className="text-xs text-red-500">
+                ✗{output.elapsed_ms != null && (
+                  <span className="ml-1 font-mono text-gray-400">{output.elapsed_ms >= 1000 ? `${(output.elapsed_ms / 1000).toFixed(1)}s` : `${output.elapsed_ms}ms`}</span>
+                )}
+              </span>
             )}
             <button
               onClick={handleRun}
@@ -276,7 +294,20 @@ export default function NotebookCell({
                   <span>Executing…</span>
                 </div>
               ) : output ? (
-                <CellOutput output={output} sessionId={sessionId} />
+                <>
+                  <CellOutput output={output} sessionId={sessionId} />
+                  {hasError && onDebugError && (
+                    <button
+                      onClick={handleDebugError}
+                      className="mt-2 flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 transition-colors"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      Debug with AI
+                    </button>
+                  )}
+                </>
               ) : null}
             </div>
           )}
@@ -285,3 +316,28 @@ export default function NotebookCell({
     </div>
   );
 }
+
+// Stable JSON comparison for output objects to avoid re-renders from new references
+function outputEqual(a: CellOutputData | null, b: CellOutputData | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  // Compare by status + exit_code as a fast path — covers most cases
+  if (a.status !== b.status) return false;
+  if (a.exit_code !== b.exit_code) return false;
+  // For complete outputs, reference stability is enough after the fast check
+  // Only do full comparison for outputs that differ on fast path
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export default memo(NotebookCell, (prev, next) => {
+  return (
+    prev.cellId === next.cellId &&
+    prev.cellNumber === next.cellNumber &&
+    prev.initialCode === next.initialCode &&
+    prev.isStreaming === next.isStreaming &&
+    prev.sessionId === next.sessionId &&
+    prev.isUserCell === next.isUserCell &&
+    prev.autoCollapsed === next.autoCollapsed &&
+    outputEqual(prev.initialOutput, next.initialOutput)
+  );
+});

@@ -18,6 +18,7 @@ interface NotebookViewProps {
   sessionId: string;
   status: string;
   onAskAI?: (cellNumber: number) => void;
+  onDebugError?: (code: string, error: string) => void;
 }
 
 interface CodeCell {
@@ -41,17 +42,24 @@ interface InstallBadge {
   isRunning: boolean;
 }
 
-type NotebookItem = CodeCell | PromptDivider | InstallBadge;
+interface SaveDatasetBadge {
+  type: "save_dataset";
+  filename: string;
+  success: boolean | null;
+  isRunning: boolean;
+}
+
+type NotebookItem = CodeCell | PromptDivider | InstallBadge | SaveDatasetBadge;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function isToolPart(part: { type: string } & Record<string, unknown>): boolean {
   return (
-    part.type === "tool-execute_python" ||
-    part.type === "tool-install_package" ||
+    part.type.startsWith("tool-") ||
     part.type === "dynamic-tool" ||
     part.toolName === "execute_python" ||
-    part.toolName === "install_package"
+    part.toolName === "install_package" ||
+    part.toolName === "save_dataset"
   );
 }
 
@@ -90,7 +98,7 @@ function extractNotebookItems(messages: UIMessage[]): NotebookItem[] {
           toolName?: string;
           toolCallId?: string;
           state: string;
-          input?: { code?: string; package?: string };
+          input?: { code?: string; package?: string; filename?: string };
           output?: CellOutputData;
         };
 
@@ -98,10 +106,26 @@ function extractNotebookItems(messages: UIMessage[]): NotebookItem[] {
           toolPart.toolName === "install_package" ||
           toolPart.type === "tool-install_package";
 
+        const isSaveDataset =
+          toolPart.toolName === "save_dataset" ||
+          toolPart.type === "tool-save_dataset";
+
         if (isInstall) {
           items.push({
             type: "install",
             package: toolPart.input?.package ?? "",
+            success:
+              toolPart.state === "output-available"
+                ? toolPart.output?.success ?? null
+                : null,
+            isRunning:
+              toolPart.state === "input-streaming" ||
+              toolPart.state === "input-available",
+          });
+        } else if (isSaveDataset) {
+          items.push({
+            type: "save_dataset",
+            filename: toolPart.input?.filename ?? "",
             success:
               toolPart.state === "output-available"
                 ? toolPart.output?.success ?? null
@@ -157,6 +181,7 @@ export default function NotebookView({
   sessionId,
   status,
   onAskAI,
+  onDebugError,
 }: NotebookViewProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const messageItems = useMemo(() => extractNotebookItems(messages), [messages]);
@@ -191,42 +216,67 @@ export default function NotebookView({
 
   // Merge message-derived items with user-created cells
   // Build a flat list: for each position, insert message items then any user cells at that position
-  const mergedItems: Array<
-    | (NotebookItem & { _index: number })
-    | { type: "user-code"; id: string }
-  > = [];
+  const mergedItems = useMemo(() => {
+    const result: Array<
+      | (NotebookItem & { _index: number })
+      | { type: "user-code"; id: string }
+    > = [];
 
-  for (let i = 0; i < messageItems.length; i++) {
-    const item = messageItems[i];
-    // Skip hidden AI cells
-    if (item.type === "code" && hiddenCellIds.has(item.cellId)) continue;
-    mergedItems.push({ ...item, _index: i });
-    // Insert user cells that go after this index
-    for (const uc of userCells) {
-      if (uc.afterIndex === i) {
-        mergedItems.push({ type: "user-code", id: uc.id });
+    for (let i = 0; i < messageItems.length; i++) {
+      const item = messageItems[i];
+      // Skip hidden AI cells
+      if (item.type === "code" && hiddenCellIds.has(item.cellId)) continue;
+      result.push({ ...item, _index: i });
+      // Insert user cells that go after this index
+      for (const uc of userCells) {
+        if (uc.afterIndex === i) {
+          result.push({ type: "user-code", id: uc.id });
+        }
       }
     }
-  }
-  // User cells at the end (afterIndex === -1 or >= messageItems.length)
-  for (const uc of userCells) {
-    if (uc.afterIndex === -1 || uc.afterIndex >= messageItems.length) {
-      mergedItems.push({ type: "user-code", id: uc.id });
+    // User cells at the end (afterIndex === -1 or >= messageItems.length)
+    for (const uc of userCells) {
+      if (uc.afterIndex === -1 || uc.afterIndex >= messageItems.length) {
+        result.push({ type: "user-code", id: uc.id });
+      }
     }
-  }
 
-  // Find the last code cell index so we can auto-collapse earlier error cells
-  let lastCodeIndex = -1;
-  for (let i = mergedItems.length - 1; i >= 0; i--) {
-    const mi = mergedItems[i];
-    if (mi.type === "code" || mi.type === "user-code") {
-      lastCodeIndex = i;
-      break;
+    return result;
+  }, [messageItems, userCells, hiddenCellIds]);
+
+  // Pre-compute cell numbers and auto-collapse state inside useMemo
+  // to avoid side effects (cellNumber++) and unstable derived values during render
+  const renderItems = useMemo(() => {
+    // Find last code cell index for auto-collapse logic
+    let lastCodeIdx = -1;
+    for (let i = mergedItems.length - 1; i >= 0; i--) {
+      const mi = mergedItems[i];
+      if (mi.type === "code" || mi.type === "user-code") {
+        lastCodeIdx = i;
+        break;
+      }
     }
-  }
 
-  // Number code cells
-  let cellNumber = 0;
+    // Assign stable cell numbers
+    let num = 0;
+    return mergedItems.map((item, i) => {
+      if (item.type === "user-code" || item.type === "code") {
+        num++;
+      }
+      const cellNum = num;
+
+      if (item.type === "code") {
+        const codeItem = item as CodeCell & { _index: number };
+        const hasError = codeItem.output?.status === "error" ||
+          (codeItem.output?.exit_code !== undefined && codeItem.output.exit_code !== 0);
+        return { ...item, _cellNumber: cellNum, _autoCollapse: hasError && i < lastCodeIdx };
+      }
+      if (item.type === "user-code") {
+        return { ...item, _cellNumber: cellNum };
+      }
+      return item;
+    });
+  }, [mergedItems]);
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -243,21 +293,22 @@ export default function NotebookView({
           </div>
         )}
 
-        {mergedItems.map((item, i) => {
+        {renderItems.map((item, i) => {
           if (item.type === "user-code") {
-            cellNumber++;
+            const userItem = item as { type: "user-code"; id: string; _cellNumber: number };
             return (
-              <div key={item.id}>
+              <div key={userItem.id}>
                 <NotebookCell
-                  cellId={item.id}
-                  cellNumber={cellNumber}
+                  cellId={userItem.id}
+                  cellNumber={userItem._cellNumber}
                   initialCode=""
                   initialOutput={null}
                   isStreaming={false}
                   sessionId={sessionId}
                   isUserCell
-                  onDelete={() => deleteUserCell(item.id)}
+                  onDelete={() => deleteUserCell(userItem.id)}
                   onAskAI={onAskAI}
+                  onDebugError={onDebugError}
                 />
                 <AddCellButton onClick={() => addCellAfter(i)} />
               </div>
@@ -299,26 +350,44 @@ export default function NotebookView({
                 </div>
               );
 
+            case "save_dataset":
+              return (
+                <div
+                  key={`save-${i}`}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-50 border border-blue-200 text-xs"
+                >
+                  <span className="font-mono text-blue-600">
+                    save_dataset {item.filename}
+                  </span>
+                  {item.isRunning && (
+                    <span className="text-yellow-500 animate-pulse">
+                      Saving…
+                    </span>
+                  )}
+                  {item.success === true && (
+                    <span className="text-green-500">✓ Registered</span>
+                  )}
+                  {item.success === false && (
+                    <span className="text-red-500">✗ Failed</span>
+                  )}
+                </div>
+              );
+
             case "code": {
-              cellNumber++;
-              const codeItem = item as CodeCell & { _index: number };
-              // Auto-collapse error cells when they're not the last code cell
-              // (i.e., the AI retried with a new cell after this one)
-              const hasError = codeItem.output?.status === "error" ||
-                (codeItem.output?.exit_code !== undefined && codeItem.output.exit_code !== 0);
-              const shouldAutoCollapse = hasError && i < lastCodeIndex;
+              const codeItem = item as CodeCell & { _index: number; _cellNumber: number; _autoCollapse: boolean };
               return (
                 <div key={codeItem.cellId}>
                   <NotebookCell
                     cellId={codeItem.cellId}
-                    cellNumber={cellNumber}
+                    cellNumber={codeItem._cellNumber}
                     initialCode={codeItem.code}
                     initialOutput={codeItem.output}
                     isStreaming={codeItem.isStreaming}
                     sessionId={sessionId}
-                    autoCollapsed={shouldAutoCollapse}
+                    autoCollapsed={codeItem._autoCollapse}
                     onDelete={() => hideAICell(codeItem.cellId)}
                     onAskAI={onAskAI}
+                    onDebugError={onDebugError}
                   />
                   <AddCellButton onClick={() => addCellAfter(codeItem._index)} />
                 </div>

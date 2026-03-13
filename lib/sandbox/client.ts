@@ -4,9 +4,8 @@
 // Provides Jupyter code execution, file upload, and package installation.
 
 import { SandboxClient } from "@agent-infra/sandbox";
-import { writeFile, mkdir } from "fs/promises";
-import { join } from "path";
 import { randomUUID } from "crypto";
+import { saveOutputFile, listDataFiles, getDataFile } from "@/lib/storage/files";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -47,13 +46,50 @@ function getClient(): SandboxClient {
   return client;
 }
 
-// ── Session Tracking ─────────────────────────────────────────────────────────
+// ── Session Tracking (HMR-safe) ──────────────────────────────────────────────
 // The sandbox assigns its own session UUIDs. We must reuse the sandbox-returned
 // session_id to maintain kernel state across calls.
-// Maps: DataChat sessionId → sandbox kernel session_id
-const sandboxSessionMap = new Map<string, string>();
+// Stored on globalThis so HMR doesn't wipe active kernel mappings.
+const globalForSession = globalThis as unknown as {
+  sandboxSessionMap: Map<string, string>;
+  sandboxSessionLocks: Map<string, Promise<unknown>>;
+};
+if (!globalForSession.sandboxSessionMap) {
+  globalForSession.sandboxSessionMap = new Map();
+}
+if (!globalForSession.sandboxSessionLocks) {
+  globalForSession.sandboxSessionLocks = new Map();
+}
+const sandboxSessionMap = globalForSession.sandboxSessionMap;
+const sandboxSessionLocks = globalForSession.sandboxSessionLocks;
+
+/**
+ * Per-session mutex. Ensures only one executeCode call runs at a time per session,
+ * preventing concurrent kernel access that causes SDK errors and cascading resets.
+ */
+async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+  // Wait for any in-flight operation on this session to finish
+  const prev = sandboxSessionLocks.get(sessionId) ?? Promise.resolve();
+  let resolve: () => void;
+  const next = new Promise<void>((r) => { resolve = r; });
+  sandboxSessionLocks.set(sessionId, next);
+
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    resolve!();
+    // Clean up if we're the last waiter
+    if (sandboxSessionLocks.get(sessionId) === next) {
+      sandboxSessionLocks.delete(sessionId);
+    }
+  }
+}
 
 const BOOTSTRAP_CODE = (dataDir: string) => `
+import os
+DATA_DIR = "${dataDir}"
+os.makedirs(DATA_DIR, exist_ok=True)
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -63,8 +99,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import warnings
 warnings.filterwarnings('ignore')
-DATA_DIR = "${dataDir}"
-print("Environment ready.")
+print("Environment ready. DATA_DIR =", DATA_DIR)
 `.trim();
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -72,7 +107,7 @@ print("Environment ready.")
 /**
  * Converts a Plotly JSON spec into a self-contained HTML page for iframe rendering.
  */
-function plotlyJsonToHtml(plotlyJson: Record<string, unknown>): string {
+export function plotlyJsonToHtml(plotlyJson: Record<string, unknown>): string {
   const spec = JSON.stringify(plotlyJson);
   return `<!DOCTYPE html>
 <html><head>
@@ -88,7 +123,7 @@ Plotly.newPlot("plot",spec.data||[],spec.layout||{},{responsive:true});
 </body></html>`;
 }
 
-function extractRichOutputs(
+export function extractRichOutputs(
   data: Record<string, unknown> | undefined
 ): RichOutput[] {
   if (!data) return [];
@@ -162,7 +197,7 @@ function extractRichOutputs(
   return outputs;
 }
 
-function transformJupyterResponse(
+export function transformJupyterResponse(
   jupyterData: {
     status: string;
     outputs: Array<{
@@ -215,121 +250,220 @@ function transformJupyterResponse(
   return { status, stdout, stderr, results, error };
 }
 
+/**
+ * Re-uploads all files from S3 to the sandbox.
+ * Called after kernel bootstrap to ensure files are available even if the
+ * sandbox restarted or the initial upload failed.
+ */
+async function syncFilesToSandbox(sessionId: string): Promise<void> {
+  try {
+    const filenames = await listDataFiles(sessionId);
+    for (const filename of filenames) {
+      const buffer = await getDataFile(sessionId, filename);
+      const remotePath = `/home/gem/data/${sessionId}/${filename}`;
+      await getClient().file.uploadFile({
+        file: new Blob([new Uint8Array(buffer)]),
+        path: remotePath,
+      });
+      console.log("[syncFiles] Uploaded to sandbox:", remotePath);
+    }
+  } catch (err) {
+    console.warn("[syncFiles] Failed to sync files to sandbox:", err);
+  }
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 export async function executeCode(
   sessionId: string,
   code: string
 ): Promise<SandboxExecutionResult> {
+  // Serialize all executions for this session to prevent concurrent kernel access
+  return withSessionLock(sessionId, () => executeCodeInner(sessionId, code));
+}
+
+async function executeCodeInner(
+  sessionId: string,
+  code: string
+): Promise<SandboxExecutionResult> {
   const dataDir = `/home/gem/data/${sessionId}`;
-  let sandboxSessionId = sandboxSessionMap.get(sessionId);
 
-  // Bootstrap: create a new kernel and pre-import libraries
-  if (!sandboxSessionId) {
-    const bootstrapRes = await getClient().jupyter.executeCode({
-      code: BOOTSTRAP_CODE(dataDir),
-      kernel_name: "python3",
-      timeout: 30,
-    });
+  // Ensure we have a live kernel (bootstrap if needed)
+  const kernelResult = await ensureKernel(sessionId, dataDir);
+  if (!kernelResult.ok) return kernelResult.error;
 
-    if (bootstrapRes.ok && bootstrapRes.body.data?.session_id) {
-      sandboxSessionId = bootstrapRes.body.data.session_id;
-      sandboxSessionMap.set(sessionId, sandboxSessionId);
-    } else {
-      return {
-        status: "error",
-        stdout: "",
-        stderr: `Failed to bootstrap sandbox session: ${JSON.stringify(bootstrapRes.ok ? bootstrapRes.body : bootstrapRes.error)}`,
-        results: [],
-      };
-    }
-  }
+  let sandboxSessionId = kernelResult.sandboxSessionId;
 
-  // Execute the actual code using the sandbox's kernel session
+  // Execute the actual code
   let response = await getClient().jupyter.executeCode({
     code,
     kernel_name: "python3",
     session_id: sandboxSessionId,
-    timeout: 60,
+    timeout: 180,
   });
 
-  // If the kernel died or errored at the SDK level, try once with a fresh kernel
+  // ── Handle failures ──
+  // IMPORTANT: Distinguish between timeouts and real kernel death.
+  // Timeouts mean the kernel is still alive (variables preserved) — DON'T reset.
+  // SDK errors / dead kernel errors mean the kernel is gone — reset and retry.
+
   if (!response.ok) {
-    console.log("[executeCode] SDK error, resetting kernel for session:", sessionId);
-    sandboxSessionMap.delete(sessionId);
+    const errStr = JSON.stringify(response.error ?? "");
 
-    // Re-bootstrap
-    const bootstrapRes = await getClient().jupyter.executeCode({
-      code: BOOTSTRAP_CODE(dataDir),
-      kernel_name: "python3",
-      timeout: 30,
-    });
-
-    if (bootstrapRes.ok && bootstrapRes.body.data?.session_id) {
-      sandboxSessionId = bootstrapRes.body.data.session_id;
-      sandboxSessionMap.set(sessionId, sandboxSessionId);
-
-      // Retry the original code on the fresh kernel
-      response = await getClient().jupyter.executeCode({
-        code,
-        kernel_name: "python3",
-        session_id: sandboxSessionId,
-        timeout: 60,
-      });
-    }
-
-    if (!response.ok) {
+    // Timeout: kernel is alive but code ran too long. Return timeout without resetting.
+    if (errStr.toLowerCase().includes("timeout")) {
+      console.log("[executeCode] Timeout (kernel still alive), session:", sessionId);
       return {
-        status: "error",
+        status: "timeout",
         stdout: "",
-        stderr: `Sandbox error (after kernel reset): ${JSON.stringify(response.error)}`,
+        stderr: "Code execution timed out (180s limit). The kernel is still alive — your variables are preserved. Try breaking the task into smaller steps.",
         results: [],
       };
     }
+
+    // Real SDK error: kernel is dead, reset and retry once
+    console.log("[executeCode] SDK error, resetting kernel for session:", sessionId);
+    sandboxSessionMap.delete(sessionId);
+
+    const retryKernel = await ensureKernel(sessionId, dataDir);
+    if (!retryKernel.ok) return retryKernel.error;
+    sandboxSessionId = retryKernel.sandboxSessionId;
+
+    response = await getClient().jupyter.executeCode({
+      code,
+      kernel_name: "python3",
+      session_id: sandboxSessionId,
+      timeout: 180,
+    });
+
+    if (!response.ok) {
+      console.error("[executeCode] Failed after kernel reset:", JSON.stringify(response.error));
+      return {
+        status: "error",
+        stdout: "",
+        stderr: "Sandbox execution failed after kernel reset. Please try again.",
+        results: [],
+      };
+    }
+
+    console.log("[executeCode] Retry after kernel reset succeeded");
   }
 
   const rawData = response.body.data;
 
-  // If the kernel returned an ExecutionError that looks like a dead session ID,
-  // reset and retry once
-  if (rawData?.status === "error" && rawData.outputs?.length === 1) {
-    const errOutput = rawData.outputs[0];
-    if (
-      errOutput.output_type === "error" &&
-      errOutput.ename === "ExecutionError" &&
-      errOutput.evalue?.match(/^[0-9a-f-]{36}$/i)
-    ) {
-      console.log("[executeCode] Detected dead kernel (ExecutionError with session UUID), resetting...");
-      sandboxSessionMap.delete(sessionId);
+  // Dead kernel error (ExecutionError with stale UUID) — reset and retry once
+  if (isDeadKernelError(rawData)) {
+    console.log("[executeCode] Dead kernel detected, resetting for session:", sessionId);
+    sandboxSessionMap.delete(sessionId);
 
-      const bootstrapRes = await getClient().jupyter.executeCode({
-        code: BOOTSTRAP_CODE(dataDir),
-        kernel_name: "python3",
-        timeout: 30,
-      });
+    const retryKernel = await ensureKernel(sessionId, dataDir);
+    if (!retryKernel.ok) return retryKernel.error;
+    sandboxSessionId = retryKernel.sandboxSessionId;
 
-      if (bootstrapRes.ok && bootstrapRes.body.data?.session_id) {
-        sandboxSessionId = bootstrapRes.body.data.session_id;
-        sandboxSessionMap.set(sessionId, sandboxSessionId);
+    const retryRes = await getClient().jupyter.executeCode({
+      code,
+      kernel_name: "python3",
+      session_id: sandboxSessionId,
+      timeout: 180,
+    });
 
-        const retryRes = await getClient().jupyter.executeCode({
-          code,
-          kernel_name: "python3",
-          session_id: sandboxSessionId,
-          timeout: 60,
-        });
-
-        if (retryRes.ok) {
-          console.log("[executeCode] Retry after kernel reset succeeded");
-          return transformJupyterResponse(retryRes.body.data);
-        }
-      }
+    if (retryRes.ok) {
+      console.log("[executeCode] Retry after dead kernel reset succeeded");
+      return transformJupyterResponse(retryRes.body.data);
     }
+
+    return {
+      status: "error",
+      stdout: "",
+      stderr: "Sandbox execution failed after kernel reset. Please try again.",
+      results: [],
+    };
   }
 
   console.log("[executeCode] status:", rawData?.status, "outputs:", rawData?.outputs?.length);
-
   return transformJupyterResponse(rawData);
+}
+
+/**
+ * Bootstrap a kernel if one doesn't exist for this session.
+ * Returns the sandbox session ID on success.
+ */
+async function ensureKernel(
+  sessionId: string,
+  dataDir: string
+): Promise<
+  | { ok: true; sandboxSessionId: string }
+  | { ok: false; error: SandboxExecutionResult }
+> {
+  const existing = sandboxSessionMap.get(sessionId);
+  if (existing) {
+    // Probe: verify the kernel is still alive and has DATA_DIR.
+    // The sandbox may have killed the idle kernel while we still hold the session ID.
+    const probe = await getClient().jupyter.executeCode({
+      code: "print(DATA_DIR)",
+      kernel_name: "python3",
+      session_id: existing,
+      timeout: 10,
+    });
+
+    if (probe.ok && probe.body.data?.status === "ok") {
+      return { ok: true, sandboxSessionId: existing };
+    }
+
+    // Kernel is dead or state was lost — drop the stale ID and re-bootstrap
+    console.log("[ensureKernel] Stale kernel detected (probe failed), re-bootstrapping session:", sessionId);
+    sandboxSessionMap.delete(sessionId);
+  }
+
+  const bootstrapRes = await getClient().jupyter.executeCode({
+    code: BOOTSTRAP_CODE(dataDir),
+    kernel_name: "python3",
+    timeout: 30,
+  });
+
+  if (!bootstrapRes.ok || !bootstrapRes.body.data?.session_id) {
+    console.error("[bootstrap] Failed:", JSON.stringify(bootstrapRes.ok ? bootstrapRes.body : bootstrapRes.error));
+    return {
+      ok: false,
+      error: {
+        status: "error",
+        stdout: "",
+        stderr: "Failed to bootstrap sandbox session. Please try again.",
+        results: [],
+      },
+    };
+  }
+
+  const sandboxSessionId = bootstrapRes.body.data.session_id;
+  sandboxSessionMap.set(sessionId, sandboxSessionId);
+
+  const bData = bootstrapRes.body.data;
+  if (bData.status !== "ok") {
+    console.warn("[bootstrap] Python-level error:", JSON.stringify(bData.outputs?.slice(0, 2)));
+  } else {
+    console.log("[bootstrap] Kernel ready for session:", sessionId);
+  }
+
+  // Re-upload session files (handles sandbox restarts + failed initial uploads)
+  await syncFilesToSandbox(sessionId);
+
+  return { ok: true, sandboxSessionId };
+}
+
+/**
+ * Detect a dead kernel: the sandbox returns an ExecutionError whose evalue is
+ * a bare UUID (the stale session ID).
+ */
+function isDeadKernelError(
+  data: { status?: string; outputs?: Array<{ output_type?: string; ename?: string; evalue?: string }> } | undefined
+): boolean {
+  if (!data || data.status !== "error" || data.outputs?.length !== 1) return false;
+  const err = data.outputs[0];
+  return (
+    err.output_type === "error" &&
+    err.ename === "ExecutionError" &&
+    /^[0-9a-f-]{36}$/i.test(err.evalue ?? "")
+  );
 }
 
 export async function uploadFile(
@@ -354,12 +488,32 @@ export async function uploadFile(
   };
 }
 
+export async function downloadFile(
+  sessionId: string,
+  filename: string
+): Promise<Buffer> {
+  const remotePath = `/home/gem/data/${sessionId}/${filename}`;
+
+  const response = await getClient().file.downloadFile({ path: remotePath });
+
+  if (!response.ok) {
+    throw new Error(`File not found in sandbox: ${filename}`);
+  }
+
+  const arrayBuffer = await response.body.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
 export async function installPackage(
   sessionId: string,
   packageName: string
 ): Promise<{ success: boolean; output: string }> {
-  // Sanitize package name to prevent injection
-  const safePkg = packageName.replace(/[^a-zA-Z0-9._\-\[\]>=<! ]/g, "");
+  // Validate package name with an allowlist regex instead of stripping chars
+  const PKG_PATTERN = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?(\[[\w,]+\])?(([><=!~]=?[0-9a-zA-Z.*]+,?)*)?$/;
+  const safePkg = packageName.trim();
+  if (!PKG_PATTERN.test(safePkg)) {
+    return { success: false, output: `Invalid package name: "${packageName}"` };
+  }
 
   // Install from within the Jupyter kernel so the package is on the same sys.path.
   // After installing, invalidate the import cache so the kernel can find the new package.
@@ -421,23 +575,19 @@ export function stripBase64ForStorage(result: SandboxExecutionResult): SandboxEx
 }
 
 /**
- * Saves rich outputs (images, Plotly HTML) to disk for serving via the output API.
+ * Saves rich outputs (images, Plotly HTML) to S3 for serving via the output API.
  * Returns filenames for images/Plotly and inline HTML strings for DataFrame tables.
  */
 export async function saveOutputFiles(
   sessionId: string,
   results: RichOutput[]
 ): Promise<{ filenames: string[]; tables: string[] }> {
-  const outputDir = join(process.cwd(), "uploads", sessionId, "output");
-  await mkdir(outputDir, { recursive: true });
-
   const filenames: string[] = [];
   const tables: string[] = [];
 
   for (const result of results) {
     switch (result.type) {
       case "image": {
-        // Map MIME type → file extension
         const extMap: Record<string, string> = {
           "image/png": "png",
           "image/jpeg": "jpg",
@@ -448,18 +598,17 @@ export async function saveOutputFiles(
         const ext = extMap[result.mimeType] ?? "png";
         const filename = `${randomUUID()}.${ext}`;
         const buffer = Buffer.from(result.content, "base64");
-        await writeFile(join(outputDir, filename), buffer);
+        await saveOutputFile(sessionId, filename, buffer, result.mimeType);
         filenames.push(filename);
         break;
       }
       case "svg": {
         const filename = `${randomUUID()}.svg`;
-        await writeFile(join(outputDir, filename), result.content, "utf-8");
+        await saveOutputFile(sessionId, filename, result.content, "image/svg+xml");
         filenames.push(filename);
         break;
       }
       case "html": {
-        // Rich HTML with scripts (Plotly, Bokeh, Vega, etc.) → save to disk, serve in iframe
         if (
           result.content.includes("<script") ||
           result.content.includes("plotly") ||
@@ -467,17 +616,15 @@ export async function saveOutputFiles(
           result.content.includes("vega")
         ) {
           const filename = `${randomUUID()}.html`;
-          await writeFile(join(outputDir, filename), result.content, "utf-8");
+          await saveOutputFile(sessionId, filename, result.content, "text/html");
           filenames.push(filename);
         } else {
-          // DataFrame tables and simple HTML → inline
           tables.push(result.content);
         }
         break;
       }
       case "latex":
       case "markdown":
-        // Render as inline text content (displayed as stdout-style in the output)
         tables.push(result.content);
         break;
     }

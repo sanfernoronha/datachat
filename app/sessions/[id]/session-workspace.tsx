@@ -3,10 +3,7 @@
 //
 // Client-side orchestrator for the three-panel session workspace.
 // Layout: Files (left) | Notebook (center) | Chat + Checkpoints (right)
-//
-// useChat() is lifted here so both NotebookView and ChatPanel share the
-// same message stream. The notebook is the primary workspace; chat is the
-// assistant panel.
+// Restyled to match Stitch design.
 
 import { useState, useRef } from "react";
 import { useChat } from "@ai-sdk/react";
@@ -17,6 +14,7 @@ import NotebookView from "@/components/notebook/notebook-view";
 import FileDropzone from "@/components/upload/file-dropzone";
 import CheckpointPanel from "@/components/session/checkpoint-panel";
 import DataQualityBanner from "@/components/data/data-quality-banner";
+import ExportButton from "@/components/notebook/export-button";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,15 +54,14 @@ export default function SessionWorkspace({
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   const [cellAttachment, setCellAttachment] = useState<number | null>(null);
 
-  // Ref for sending prompts from sidebar actions
   const sendPromptRef = useRef<(text: string) => void>(() => {});
 
-  // Lift useChat() here so notebook + chat share the same message stream
   const { messages, sendMessage, stop, status, error } = useChat({
     transport: new DefaultChatTransport({
       api: `/api/sessions/${sessionId}/chat`,
     }),
     messages: initialMessages,
+    experimental_throttle: 100,
   });
 
   function handleUploadSuccess(result: {
@@ -88,6 +85,14 @@ export default function SessionWorkspace({
     setCheckpoints((prev) => [...prev, checkpoint]);
   }
 
+  function handleCheckpointRestored() {
+    window.location.reload();
+  }
+
+  function handleCheckpointDeleted(checkpointId: string) {
+    setCheckpoints((prev) => prev.filter((c) => c.id !== checkpointId));
+  }
+
   async function handleDeleteFile(fileId: string) {
     const res = await fetch(`/api/sessions/${sessionId}/files/${fileId}`, { method: "DELETE" });
     if (res.ok) {
@@ -98,29 +103,47 @@ export default function SessionWorkspace({
   return (
     <>
       {/* ── Left Sidebar: Files ──────────────────────────────────────────── */}
-      <aside className="w-56 shrink-0 overflow-y-auto border-r bg-white px-4 py-5">
-        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
-          Datasets
-        </h2>
-        <FileDropzone
-          sessionId={sessionId}
-          onUploadSuccess={handleUploadSuccess}
-        />
-        <ul className="mt-4 space-y-2">
-          {files.map((file) => (
-            <FileCard key={file.id} file={file} onDelete={handleDeleteFile} />
-          ))}
-        </ul>
-        {files.length > 0 && (
-          <DataQualityBanner
-            files={files}
-            onAskClean={(prompt) => sendPromptRef.current(prompt)}
-          />
-        )}
+      <aside className="w-[224px] border-r border-gray-200 bg-white flex flex-col shrink-0 overflow-y-auto">
+        <div className="p-4 space-y-6">
+          {/* Data Quality Banner */}
+          {files.length > 0 && (
+            <DataQualityBanner
+              files={files}
+              onAskClean={(prompt) => sendPromptRef.current(prompt)}
+            />
+          )}
+
+          {/* Project Assets */}
+          <section>
+            <h2 className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-3">
+              Project Assets
+            </h2>
+            <div className="space-y-2">
+              <FileDropzone
+                sessionId={sessionId}
+                onUploadSuccess={handleUploadSuccess}
+              />
+              {files.map((file) => (
+                <FileCard key={file.id} file={file} onDelete={handleDeleteFile} />
+              ))}
+            </div>
+          </section>
+
+        </div>
       </aside>
 
       {/* ── Center: Notebook ─────────────────────────────────────────────── */}
-      <main className="flex flex-1 flex-col overflow-hidden bg-white">
+      <main className="flex flex-1 flex-col overflow-hidden bg-[#f8f6f6]">
+        <div className="flex items-center justify-between px-6 py-2 border-b border-gray-200 bg-white">
+          <div className="flex items-center gap-4">
+            <span className="text-xs font-mono text-gray-400">[Py3.11]</span>
+            <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-medium">
+              <span className="size-2 bg-emerald-500 rounded-full" />
+              Kernel Ready
+            </div>
+          </div>
+          <ExportButton sessionId={sessionId} />
+        </div>
         <NotebookView
           messages={messages}
           sessionId={sessionId}
@@ -129,18 +152,34 @@ export default function SessionWorkspace({
             setCellAttachment(cellNumber);
             sendPromptRef.current("Explain and suggest improvements");
           }}
+          onDebugError={(code, error) => {
+            const prompt = `Debug this error and fix the code:\n\nError:\n\`\`\`\n${error.slice(0, 2000)}\n\`\`\`\n\nCode:\n\`\`\`python\n${code.slice(0, 3000)}\n\`\`\``;
+            sendMessage({ parts: [{ type: "text", text: prompt }] });
+          }}
         />
       </main>
 
       {/* ── Right Sidebar: Chat + Checkpoints ────────────────────────────── */}
-      <aside className="w-[32rem] shrink-0 flex flex-col border-l bg-white">
+      <aside className="w-[512px] shrink-0 flex flex-col border-l border-gray-200 bg-white">
+        {/* Chat header */}
+        <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+          <div className="flex items-center gap-2">
+            <div className="size-8 bg-primary rounded-lg flex items-center justify-center text-white">
+              <span className="material-symbols-outlined" style={{ fontSize: 18 }}>bolt</span>
+            </div>
+            <div>
+              <p className="text-sm font-bold text-gray-900">DataChat AI</p>
+              <p className="text-[10px] text-emerald-500 flex items-center gap-1">
+                <span className="size-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                Online
+                {files.length > 0 && <>&nbsp;&middot; Analyzing {files[files.length - 1].filename}</>}
+              </p>
+            </div>
+          </div>
+        </div>
+
         {/* Chat panel */}
         <div className="flex-1 overflow-hidden flex flex-col">
-          <div className="px-3 py-2 border-b bg-gray-50">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
-              AI Assistant
-            </h2>
-          </div>
           <ChatPanel
             sessionId={sessionId}
             messages={messages}
@@ -156,22 +195,27 @@ export default function SessionWorkspace({
         </div>
 
         {/* Checkpoints — collapsible at bottom */}
-        <div className="border-t">
+        <div className="border-t border-gray-200 bg-gray-50">
           <button
             onClick={() => setCheckpointsOpen(!checkpointsOpen)}
-            className="w-full px-3 py-2 flex items-center justify-between bg-gray-50 hover:bg-gray-100 transition-colors"
+            className="w-full px-4 py-3 flex items-center justify-between text-xs font-bold text-gray-500"
           >
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined" style={{ fontSize: 16 }}>history</span>
               Checkpoints ({checkpoints.length})
-            </h2>
-            <span className="text-xs text-gray-400">{checkpointsOpen ? "▾" : "▸"}</span>
+            </div>
+            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+              {checkpointsOpen ? "expand_less" : "expand_more"}
+            </span>
           </button>
           {checkpointsOpen && (
-            <div className="px-3 py-2 max-h-48 overflow-y-auto">
+            <div className="px-4 pb-4">
               <CheckpointPanel
                 sessionId={sessionId}
                 checkpoints={checkpoints}
                 onCheckpointCreated={handleCheckpointCreated}
+                onCheckpointRestored={handleCheckpointRestored}
+                onCheckpointDeleted={handleCheckpointDeleted}
               />
             </div>
           )}
@@ -186,49 +230,49 @@ export default function SessionWorkspace({
 function FileCard({ file, onDelete }: { file: FileRecord; onDelete: (id: string) => void }) {
   const [confirming, setConfirming] = useState(false);
   const schema = file.schema as { columns?: Record<string, unknown>; rowCount?: number } | null;
-  const columnCount = schema?.columns ? Object.keys(schema.columns).length : 0;
-  const rowCount = schema?.rowCount ?? 0;
+  const ext = file.filename.split(".").pop()?.toUpperCase() || "";
+  const sizeStr = file.fileSize > 0
+    ? file.fileSize > 1048576
+      ? `${(file.fileSize / 1048576).toFixed(1)} MB`
+      : `${(file.fileSize / 1024).toFixed(0)} KB`
+    : "";
+  const meta = [sizeStr, ext].filter(Boolean).join(" \u00B7 ");
 
   return (
-    <li className="rounded-lg border bg-gray-50 px-3 py-2.5 text-sm group relative">
-      <div className="flex items-start justify-between">
-        <div className="min-w-0 flex-1">
-          <p className="font-medium text-gray-800 truncate text-xs" title={file.filename}>
-            {file.filename}
-          </p>
-          <p className="mt-0.5 text-[10px] text-gray-400">
-            {rowCount.toLocaleString()} rows · {columnCount} cols
+    <div className="group relative flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 transition-colors">
+      <div className="flex items-center gap-3 overflow-hidden">
+        <span className="material-symbols-outlined text-gray-400" style={{ fontSize: 20 }}>description</span>
+        <div className="overflow-hidden">
+          <p className="text-xs font-semibold text-gray-900 truncate" title={file.filename}>{file.filename}</p>
+          <p className="text-[10px] text-gray-500">
+            {meta || (schema?.rowCount ? `${schema.rowCount.toLocaleString()} rows` : "Uploaded")}
           </p>
         </div>
-        {!confirming && (
-          <button
-            onClick={() => setConfirming(true)}
-            className="ml-1 rounded p-0.5 text-gray-300 opacity-0 group-hover:opacity-100 hover:text-red-500 transition"
-            title="Remove file"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        )}
       </div>
-      {confirming && (
-        <div className="mt-1.5 flex items-center gap-2 text-xs">
-          <span className="text-gray-500">Remove?</span>
+      {confirming ? (
+        <div className="flex items-center gap-1 text-xs shrink-0">
           <button
             onClick={() => { onDelete(file.id); setConfirming(false); }}
-            className="rounded bg-red-500 px-2 py-0.5 text-white hover:bg-red-600"
+            className="rounded bg-red-500 px-1.5 py-0.5 text-white hover:bg-red-600 text-[10px]"
           >
-            Yes
+            Delete
           </button>
           <button
             onClick={() => setConfirming(false)}
-            className="rounded bg-gray-200 px-2 py-0.5 text-gray-700 hover:bg-gray-300"
+            className="rounded bg-gray-200 px-1.5 py-0.5 text-gray-700 hover:bg-gray-300 text-[10px]"
           >
             No
           </button>
         </div>
+      ) : (
+        <button
+          onClick={() => setConfirming(true)}
+          className="material-symbols-outlined text-red-500 p-1 hover:bg-red-50 rounded opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+          style={{ fontSize: 16 }}
+        >
+          delete
+        </button>
       )}
-    </li>
+    </div>
   );
 }

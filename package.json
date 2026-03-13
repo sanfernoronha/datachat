@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@agent-infra/sandbox": "^1.0.12",
@@ -15,11 +18,16 @@
     "@ai-sdk/openai": "^3.0.36",
     "@ai-sdk/react": "^3.0.105",
     "@anthropic-ai/sdk": "^0.78.0",
+    "@aws-sdk/client-s3": "^3.1007.0",
     "@prisma/adapter-pg": "^7.4.1",
     "@prisma/client": "^7.4.1",
+    "@types/archiver": "^7.0.0",
     "@types/codemirror": "^5.60.17",
+    "@types/dompurify": "^3.0.5",
     "ai": "^6.0.103",
+    "archiver": "^7.0.1",
     "codemirror": "^5.65.21",
+    "dompurify": "^3.3.3",
     "next": "16.1.6",
     "papaparse": "^5.5.3",
     "pg": "^8.19.0",
@@ -38,10 +46,12 @@
     "@types/pg": "^8.16.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitest/coverage-v8": "^4.1.0",
     "dotenv": "^17.3.1",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.0"
   }
 }

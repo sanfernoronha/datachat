@@ -19,6 +19,10 @@ export async function POST(
     return NextResponse.json({ error: "Code cannot be empty" }, { status: 400 });
   }
 
+  if (code.length > 100_000) {
+    return NextResponse.json({ error: "Code too long (max 100,000 characters)" }, { status: 400 });
+  }
+
   const execResult = await executeCode(sessionId, code);
   const { filenames, tables } = await saveOutputFiles(sessionId, execResult.results);
 

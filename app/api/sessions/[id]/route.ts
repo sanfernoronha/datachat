@@ -23,6 +23,10 @@ export async function PATCH(
     return new Response("Name cannot be empty", { status: 400 });
   }
 
+  if (name.length > 200) {
+    return new Response("Name too long (max 200 characters)", { status: 400 });
+  }
+
   const session = await prisma.session.update({
     where: { id },
     data: { name },
@@ -49,9 +53,13 @@ export async function DELETE(
   // Cascade delete: Session → Messages, UploadedFiles, Checkpoints
   await prisma.session.delete({ where: { id } });
 
-  // Clean up disk: session uploads/output + checkpoint snapshots
-  await deleteSessionDirectory(id);
-  await Promise.all(checkpoints.map((cp) => deleteCheckpointDirectory(cp.id)));
+  // Clean up S3: best-effort — DB is already deleted, log failures for manual cleanup
+  try {
+    await deleteSessionDirectory(id);
+    await Promise.all(checkpoints.map((cp) => deleteCheckpointDirectory(cp.id)));
+  } catch (err) {
+    console.error(`[DELETE session] S3 cleanup failed for session ${id}. Orphaned files may remain.`, err);
+  }
 
   return NextResponse.json({ success: true });
 }

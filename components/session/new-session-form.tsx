@@ -1,17 +1,14 @@
 "use client";
 // components/session/new-session-form.tsx
 //
-// A simple form to create a new analysis session.
-// On submit, POSTs to /api/sessions and redirects to the new session page.
-//
-// Client component — uses React state for the input and router for navigation.
+// Hero-style form to create a new analysis session.
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Input } from "@/components/ui/input";
 
 export default function NewSessionForm() {
   const router = useRouter();
+  const inputRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +28,6 @@ export default function NewSessionForm() {
       if (!res.ok) throw new Error("Failed to create session");
 
       const session = await res.json();
-      // Navigate to the new session's chat page
       router.push(`/sessions/${session.id}`);
     } catch {
       setError("Could not create session. Is the database running?");
@@ -39,28 +35,50 @@ export default function NewSessionForm() {
     }
   }
 
-  return (
-    <form onSubmit={handleSubmit} className="flex gap-3">
-      <Input
-        type="text"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="Session name (e.g. TCGA Breast Cancer Analysis)"
-        className="flex-1 shadow-sm"
-        disabled={loading}
-      />
-      <button
-        type="submit"
-        disabled={loading}
-        className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:opacity-50"
-      >
-        {loading ? "Creating…" : "New Session"}
-      </button>
+  /** Exposed so the "New Session" card can focus this input */
+  function focusInput() {
+    inputRef.current?.focus();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
-      {/* Inline error — avoids a full page flash for a simple form failure */}
+  // Attach to window so SessionList can call it
+  if (typeof window !== "undefined") {
+    (window as unknown as Record<string, unknown>).__focusNewSessionInput = focusInput;
+  }
+
+  return (
+    <div className="relative group">
+      <form
+        onSubmit={handleSubmit}
+        className="flex flex-col md:flex-row gap-3 p-2 bg-white rounded-2xl border border-gray-200 shadow-xl shadow-gray-200/50 transition-all focus-within:ring-2 focus-within:ring-primary/20"
+      >
+        <div className="flex-1 flex items-center px-4 gap-3">
+          <span className="material-symbols-outlined text-gray-400">upload_file</span>
+          <input
+            ref={inputRef}
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Name your session (e.g. TCGA Breast Cancer Analysis)"
+            className="w-full bg-transparent border-none focus:ring-0 focus:outline-none py-4 text-gray-900 placeholder:text-gray-400"
+            disabled={loading}
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={loading}
+          className="bg-primary hover:bg-primary/90 text-white font-bold px-8 py-4 rounded-xl flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+        >
+          <span>{loading ? "Creating..." : "Start Session"}</span>
+          {!loading && (
+            <span className="material-symbols-outlined" style={{ fontSize: 18 }}>arrow_forward</span>
+          )}
+        </button>
+      </form>
+
       {error && (
-        <p className="self-center text-sm text-red-600">{error}</p>
+        <p className="mt-2 text-sm text-red-600 text-center">{error}</p>
       )}
-    </form>
+    </div>
   );
 }

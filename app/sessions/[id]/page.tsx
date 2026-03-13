@@ -1,14 +1,7 @@
 // app/sessions/[id]/page.tsx
 //
-// The main session workspace — the primary screen users interact with.
-//
-// Layout (three-column):
-//   Left sidebar  — uploaded files list + dropzone
-//   Center panel  — chat interface (messages + input)
-//   Right sidebar — checkpoints timeline
-//
-// Server component: fetches session data server-side, then passes it to
-// client components as props (avoids client-side loading flicker).
+// Session workspace — server component that fetches data and renders layout.
+// Restyled header to match Stitch design.
 
 import { notFound } from "next/navigation";
 import Link from "next/link";
@@ -23,20 +16,20 @@ interface SessionPageProps {
 export default async function SessionPage({ params }: SessionPageProps) {
   const { id } = await params;
 
-  // Load full session data — 404 if not found
   const session = await prisma.session.findUnique({
     where: { id },
     include: {
       messages: { orderBy: { createdAt: "asc" } },
       uploadedFiles: true,
-      checkpoints: { orderBy: { createdAt: "asc" } },
+      checkpoints: {
+        orderBy: { createdAt: "asc" },
+        select: { id: true, name: true, description: true, createdAt: true },
+      },
     },
   });
 
   if (!session) notFound();
 
-  // Convert Prisma's BigInt fileSize to a plain number for JSON serialisation
-  // (BigInt cannot be serialised through the server→client boundary)
   const safeFiles = session.uploadedFiles.map((f) => ({
     id: f.id,
     sessionId: f.sessionId,
@@ -48,8 +41,6 @@ export default async function SessionPage({ params }: SessionPageProps) {
     uploadedAt: f.uploadedAt.toISOString(),
   }));
 
-  // Convert DB messages to UIMessage format (AI SDK v6).
-  // Reconstruct rich parts from metadata (tool invocations with code/results/plots).
   interface ToolMeta {
     toolName: string;
     input: { code?: string; package?: string };
@@ -61,7 +52,6 @@ export default async function SessionPage({ params }: SessionPageProps) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const parts: any[] = [];
 
-    // Reconstruct tool invocation parts from saved metadata
     if (m.role === "assistant" && meta?.tools?.length) {
       for (const tool of meta.tools) {
         const partType = tool.toolName === "install_package"
@@ -78,7 +68,6 @@ export default async function SessionPage({ params }: SessionPageProps) {
       }
     }
 
-    // Add the text part
     if (m.content) {
       parts.push({ type: "text" as const, text: m.content });
     }
@@ -92,21 +81,26 @@ export default async function SessionPage({ params }: SessionPageProps) {
   });
 
   return (
-    <div className="flex h-screen flex-col bg-gray-50">
+    <div className="flex h-screen flex-col bg-[#f8f6f6]">
       {/* ── Header bar ── */}
-      <header className="flex items-center gap-4 border-b bg-white px-6 py-3">
-        <Link href="/" className="text-gray-400 hover:text-gray-600 text-sm">
-          ← Sessions
-        </Link>
-        <SessionNameEditor sessionId={id} initialName={session.name} />
-        <span className="ml-auto text-xs text-gray-400">
-          {session.messages.length} messages · {session.uploadedFiles.length} file{session.uploadedFiles.length !== 1 ? "s" : ""}
-        </span>
+      <header className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-2 shrink-0">
+        <div className="flex items-center gap-4">
+          <Link href="/" className="flex items-center gap-2 text-gray-500 hover:text-primary transition-colors">
+            <span className="material-symbols-outlined">arrow_back</span>
+          </Link>
+          <div className="h-4 w-px bg-gray-200" />
+          <div className="flex flex-col">
+            <SessionNameEditor sessionId={id} initialName={session.name} />
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-gray-400">
+            {session.messages.length} messages &middot; {session.uploadedFiles.length} file{session.uploadedFiles.length !== 1 ? "s" : ""}
+          </span>
+        </div>
       </header>
 
       {/* ── Three-column workspace ── */}
-      {/* The SessionWorkspace is a client component that wires up state and
-          event handlers for uploads, chat, and checkpoints */}
       <div className="flex flex-1 overflow-hidden">
         <SessionWorkspace
           sessionId={id}

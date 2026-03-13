@@ -18,9 +18,12 @@ import { getModel } from "@/lib/ai/model";
 import {
   executeCode,
   installPackage,
+  downloadFile,
   toLLMSummary,
   saveOutputFiles,
 } from "@/lib/sandbox/client";
+import { saveUploadedFile } from "@/lib/storage/files";
+import { parseFile, inferSchema } from "@/lib/upload/parse";
 
 // ─── POST ──────────────────────────────────────────────────────────────────────
 
@@ -54,6 +57,10 @@ export async function POST(
 
   if (!message) {
     return new Response("Message cannot be empty", { status: 400 });
+  }
+
+  if (message.length > 50_000) {
+    return new Response("Message too long (max 50,000 characters)", { status: 400 });
   }
 
   const session = await prisma.session.findUnique({
@@ -105,7 +112,7 @@ export async function POST(
             return `[Installed package: ${t.input?.package}] ${t.output?.success ? "Success" : "Failed"}`;
           }
 
-          const parts = [`[Code executed]\n${t.input?.code ?? ""}`];
+          const parts = [`[Used execute_python tool]`];
 
           // New format
           if (t.output?.status !== undefined) {
@@ -153,7 +160,11 @@ export async function POST(
           "Execute Python code in a Jupyter kernel. You MUST use this tool for any data analysis, " +
           "computation, or visualization request. Variables persist across calls. " +
           "Pre-imported: pandas as pd, numpy as np, matplotlib.pyplot as plt, plotly.express as px, plotly.graph_objects as go. " +
-          "Use DATA_DIR to access uploaded files. If execution fails, fix the code and call again.",
+          "DATA_DIR is a pre-defined Python variable pointing to the uploaded files directory. " +
+          "Do NOT redefine it — just use it: pd.read_csv(f\"{DATA_DIR}/file.csv\"). " +
+          "IMPORTANT: Always wrap final results in print() — bare expressions produce NO visible output. " +
+          "Use print(df.head()), print(result), print(score), etc. " +
+          "If execution fails, fix the code and call again.",
         inputSchema: jsonSchema({
           type: "object" as const,
           properties: {
@@ -163,20 +174,15 @@ export async function POST(
           additionalProperties: false,
         }),
         execute: async ({ code }) => {
-          // Retry transient sandbox errors (connection issues, kernel restarts)
-          let execResult = await executeCode(sessionId, code);
+          const startTime = Date.now();
 
-          // If we got a sandbox-level error (not a Python error), retry once
-          const isTransientError =
-            execResult.status === "error" &&
-            !execResult.error && // no Python exception — it's a sandbox/connection issue
-            execResult.stderr.includes("sandbox");
-          if (isTransientError) {
-            console.log("[sandbox] Transient error, retrying:", execResult.stderr.slice(0, 200));
-            execResult = await executeCode(sessionId, code);
-          }
+          // executeCode handles kernel bootstrap + one retry on dead kernel internally.
+          // No additional retry layer needed here.
+          const execResult = await executeCode(sessionId, code);
 
-          console.log("[sandbox] status:", execResult.status);
+          const elapsed_ms = Date.now() - startTime;
+
+          console.log("[sandbox] status:", execResult.status, `(${elapsed_ms}ms)`);
           if (execResult.stdout) console.log("[sandbox] stdout:", execResult.stdout.slice(0, 200));
           if (execResult.stderr) console.log("[sandbox] stderr:", execResult.stderr.slice(0, 200));
           if (execResult.error) console.log("[sandbox] error:", execResult.error.ename, execResult.error.evalue);
@@ -191,6 +197,7 @@ export async function POST(
             ...toLLMSummary(execResult),
             plot_filenames: filenames,
             tables,
+            elapsed_ms,
           };
 
           return toolResult;
@@ -200,7 +207,9 @@ export async function POST(
       install_package: tool({
         description:
           "Install a Python package via pip. Use this when you need a package " +
-          "that is not pre-installed (e.g. seaborn, scikit-learn, lifelines, scipy).",
+          "that is not pre-installed (e.g. seaborn, scikit-learn, lifelines, scipy). " +
+          "IMPORTANT: Call this tool ALONE — do NOT call execute_python in the same step. " +
+          "Wait for installation to complete, then use the package in a subsequent execute_python call.",
         inputSchema: jsonSchema({
           type: "object" as const,
           properties: {
@@ -214,6 +223,81 @@ export async function POST(
         }),
         execute: async ({ package: pkg }) => {
           return installPackage(sessionId, pkg);
+        },
+      }),
+
+      save_dataset: tool({
+        description:
+          "Register a CSV or TSV file you saved in DATA_DIR as a tracked dataset. " +
+          "First save the file using execute_python (e.g. df.to_csv(f\"{DATA_DIR}/cleaned.csv\", index=False)), " +
+          "then call this tool with the filename. The file will appear in the session's file panel, " +
+          "its schema will be available in your context, and it will survive kernel restarts. " +
+          "If a file with the same name already exists, it will be updated.",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            filename: {
+              type: "string",
+              description: "Filename in DATA_DIR to register (e.g. 'cleaned_data.csv')",
+            },
+          },
+          required: ["filename"],
+          additionalProperties: false,
+        }),
+        execute: async ({ filename }) => {
+          // Validate filename
+          if (filename.includes("..") || filename.includes("/")) {
+            return { success: false, error: "Invalid filename — must not contain '..' or '/'" };
+          }
+          const ext = filename.split(".").pop()?.toLowerCase();
+          if (!ext || !["csv", "tsv"].includes(ext)) {
+            return { success: false, error: "Only CSV and TSV files are supported" };
+          }
+
+          try {
+            // Download the file from the sandbox
+            const buffer = await downloadFile(sessionId, filename);
+
+            // Parse and infer schema
+            const rows = parseFile(filename, buffer);
+            if (rows.length === 0) {
+              return { success: false, error: "File appears to be empty or unparseable" };
+            }
+            const schema = inferSchema(rows);
+
+            // Save to S3
+            const filePath = await saveUploadedFile(sessionId, filename, buffer);
+
+            // Upsert DB record (unique on sessionId + filename)
+            await prisma.uploadedFile.upsert({
+              where: { sessionId_filename: { sessionId, filename } },
+              create: {
+                sessionId,
+                filename,
+                filePath,
+                fileSize: BigInt(buffer.length),
+                fileType: ext === "tsv" ? "text/tab-separated-values" : "text/csv",
+                schema: schema as object,
+              },
+              update: {
+                filePath,
+                fileSize: BigInt(buffer.length),
+                fileType: ext === "tsv" ? "text/tab-separated-values" : "text/csv",
+                schema: schema as object,
+              },
+            });
+
+            return {
+              success: true,
+              filename,
+              rowCount: schema.rowCount,
+              columnCount: Object.keys(schema.columns).length,
+            };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Unknown error";
+            console.error("[save_dataset] Failed:", msg);
+            return { success: false, error: msg };
+          }
         },
       }),
     },

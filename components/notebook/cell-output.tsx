@@ -5,7 +5,8 @@
 // DataFrame tables, and plots (images + Plotly iframes).
 // Shared by NotebookCell for both initial (chat-driven) and re-run outputs.
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, memo } from "react";
+import DOMPurify from "dompurify";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -16,6 +17,7 @@ export interface CellOutputData {
   error?: string;
   tables?: string[];
   plot_filenames?: string[];
+  elapsed_ms?: number;
   // Legacy
   exit_code?: number;
   // install_package
@@ -41,7 +43,7 @@ const TABLE_STYLES =
 
 // ── Component ────────────────────────────────────────────────────────────────
 
-export default function CellOutput({ output, sessionId }: CellOutputProps) {
+function CellOutputInner({ output, sessionId }: CellOutputProps) {
   return (
     <div className="space-y-3">
       {/* stdout */}
@@ -66,14 +68,23 @@ export default function CellOutput({ output, sessionId }: CellOutputProps) {
         </pre>
       )}
 
-      {/* Inline HTML tables (DataFrames) */}
+      {/* Inline HTML tables (DataFrames) — sanitized to table-related tags only */}
       {output.tables && output.tables.length > 0 && (
         <div className="space-y-3">
           {output.tables.map((html, idx) => (
             <div
               key={idx}
               className={TABLE_STYLES}
-              dangerouslySetInnerHTML={{ __html: html }}
+              dangerouslySetInnerHTML={{
+                __html: DOMPurify.sanitize(html, {
+                  ALLOWED_TAGS: [
+                    "table", "thead", "tbody", "tfoot", "tr", "th", "td",
+                    "caption", "colgroup", "col", "div", "span", "p", "br",
+                    "strong", "em", "b", "i",
+                  ],
+                  ALLOWED_ATTR: ["class", "style", "colspan", "rowspan", "scope"],
+                }),
+              }}
             />
           ))}
         </div>
@@ -117,6 +128,16 @@ export default function CellOutput({ output, sessionId }: CellOutputProps) {
     </div>
   );
 }
+
+const CellOutput = memo(CellOutputInner, (prev, next) => {
+  // Same session + same output reference = skip re-render
+  if (prev.sessionId === next.sessionId && prev.output === next.output) return true;
+  if (prev.sessionId !== next.sessionId) return false;
+  // Deep compare output content
+  return JSON.stringify(prev.output) === JSON.stringify(next.output);
+});
+
+export default CellOutput;
 
 // ── StdoutDisplay ──────────────────────────────────────────────────────────
 

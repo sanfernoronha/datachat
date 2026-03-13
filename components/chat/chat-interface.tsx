@@ -2,9 +2,7 @@
 // components/chat/chat-interface.tsx
 //
 // Compact chat panel — renders conversation as text bubbles with tool status
-// indicators. Code execution details are shown in the notebook (center panel).
-//
-// Receives useChat() state from parent (session-workspace.tsx).
+// indicators. Restyled to match Stitch design (orange user bubbles, styled AI bubbles).
 
 import { useEffect, useRef, useState, useMemo } from "react";
 import type { UIMessage } from "ai";
@@ -24,10 +22,10 @@ const DEFAULT_PROMPTS: SuggestedPrompt[] = [
 ];
 
 const PROMPT_CATEGORY_STYLES: Record<SuggestedPrompt["category"], string> = {
-  explore: "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:border-blue-300",
-  visualize: "border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 hover:border-purple-300",
-  analyze: "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300",
-  clean: "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 hover:border-amber-300",
+  explore: "border-primary/20 bg-primary/10 text-primary hover:bg-primary/20",
+  visualize: "border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100",
+  analyze: "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100",
+  clean: "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100",
 };
 
 const PROMPT_CATEGORY_ICONS: Record<SuggestedPrompt["category"], string> = {
@@ -104,7 +102,6 @@ export default function ChatPanel({
     e?.preventDefault();
     const text = input.trim();
     if (!text || isLoading) return;
-    // Prefix cell reference so the LLM gets context and bubble renders a chip
     const fullText = cellAttachment != null
       ? `@cell:${cellAttachment} ${text}`
       : text;
@@ -120,10 +117,13 @@ export default function ChatPanel({
     }
   }
 
+  // Suppress unused var warning — sessionId used for potential future features
+  void sessionId;
+
   return (
     <div className="flex h-full flex-col">
       {/* Message list */}
-      <div className="flex-1 overflow-y-auto px-3 py-4 space-y-2">
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-white">
         {messages.length === 0 && (
           <div className="space-y-3 pt-4">
             <p className="text-gray-500 text-xs text-center">
@@ -139,7 +139,7 @@ export default function ChatPanel({
                     setInput(prompt.text);
                     textareaRef.current?.focus();
                   }}
-                  className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${PROMPT_CATEGORY_STYLES[prompt.category]}`}
+                  className={`rounded-full border px-2.5 py-1 text-[11px] font-bold transition-colors ${PROMPT_CATEGORY_STYLES[prompt.category]}`}
                 >
                   {PROMPT_CATEGORY_ICONS[prompt.category]} {prompt.text}
                 </button>
@@ -155,12 +155,12 @@ export default function ChatPanel({
         {isLoading && (
           <div className="flex items-center gap-1.5 text-gray-400 text-xs px-1">
             <span className="animate-pulse">●</span>
-            <span>Thinking…</span>
+            <span>Thinking...</span>
           </div>
         )}
 
         {error && (
-          <div className="rounded bg-red-50 px-3 py-2 text-xs text-red-700">
+          <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 border border-red-200">
             {error.message}
           </div>
         )}
@@ -168,18 +168,35 @@ export default function ChatPanel({
         <div ref={bottomRef} />
       </div>
 
-      {/* Input area */}
-      <div className="border-t bg-white px-3 py-3">
-        <form onSubmit={handleSubmit} className="space-y-2">
+      {/* Input area with prompt pills */}
+      <div className="p-4 border-t border-gray-100 space-y-4">
+        {/* Prompt pills */}
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {[
+            { label: "Clean data", prompt: "Check the dataset for missing values, duplicates, and inconsistent formatting. Fix any issues, show what you changed, and save the cleaned version." },
+            { label: "Explain code", prompt: "Walk me through the most recent code cell step by step. Explain what each section does, why it was written that way, and flag anything that could be improved." },
+            { label: "Optimize run", prompt: "Profile the most recent analysis for performance bottlenecks. Suggest and apply optimizations — vectorize loops, reduce memory usage, or use more efficient algorithms." },
+          ].map(({ label, prompt }) => (
+            <button
+              key={label}
+              onClick={() => { setInput(prompt); textareaRef.current?.focus(); }}
+              className="shrink-0 px-3 py-1 rounded-full text-[10px] font-bold transition-colors bg-gray-100 text-gray-600 hover:bg-gray-200"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <form onSubmit={handleSubmit} className="relative">
           {/* Cell attachment chip */}
           {cellAttachment != null && (
-            <div className="flex items-center gap-1">
-              <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 text-blue-700 px-2 py-0.5 text-[10px] font-medium">
+            <div className="flex items-center gap-1 mb-2">
+              <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 text-primary px-2 py-0.5 text-[10px] font-medium">
                 @Cell {cellAttachment}
                 <button
                   type="button"
                   onClick={onClearCellAttachment}
-                  className="ml-0.5 rounded-full hover:bg-blue-200 p-0.5 transition-colors"
+                  className="ml-0.5 rounded-full hover:bg-primary/20 p-0.5 transition-colors"
                   title="Remove reference"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -194,27 +211,27 @@ export default function ChatPanel({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask about your data…"
+            placeholder="Ask DataChat anything about your session..."
             disabled={isLoading}
             rows={3}
-            className="w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+            className="w-full bg-slate-100 border border-slate-200 rounded-xl text-xs p-3 pr-12 focus:ring-1 focus:ring-primary resize-none min-h-[80px] text-gray-900 placeholder:text-gray-500"
           />
-          <div className="flex justify-end">
+          <div className="absolute bottom-3 right-3">
             {isLoading ? (
               <button
                 type="button"
                 onClick={() => stop()}
-                className="rounded-lg bg-red-500 px-4 py-1.5 text-xs font-medium text-white hover:bg-red-600 transition-colors"
+                className="p-2 bg-red-500 text-white rounded-lg shadow-lg hover:bg-red-600 transition"
               >
-                Stop
+                <span className="material-symbols-outlined" style={{ fontSize: 16 }}>stop</span>
               </button>
             ) : (
               <button
                 type="submit"
                 disabled={!input.trim()}
-                className="rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-40"
+                className="p-2 bg-primary text-white rounded-lg shadow-lg disabled:opacity-40 hover:bg-primary/90 transition"
               >
-                Send
+                <span className="material-symbols-outlined" style={{ fontSize: 16 }}>send</span>
               </button>
             )}
           </div>
@@ -225,8 +242,6 @@ export default function ChatPanel({
 }
 
 // ─── ChatBubble ─────────────────────────────────────────────────────────────
-// Renders a single message as a compact bubble. Tool invocations show as
-// one-line status indicators instead of full code blocks.
 
 function ChatBubble({ message }: { message: UIMessage }) {
   const isUser = message.role === "user";
@@ -237,14 +252,13 @@ function ChatBubble({ message }: { message: UIMessage }) {
       .map((p) => p.text)
       .join("");
 
-    // Parse @cell:N prefix into a chip
     const cellMatch = rawText.match(/^@cell:(\d+)\s*/);
     const cellRef = cellMatch ? parseInt(cellMatch[1], 10) : null;
     const text = cellMatch ? rawText.slice(cellMatch[0].length) : rawText;
 
     return (
-      <div className="flex justify-end">
-        <div className="max-w-[90%] rounded-xl px-3 py-2 text-xs bg-blue-600 text-white rounded-br-sm">
+      <div className="flex flex-col gap-1 items-end ml-auto max-w-[85%]">
+        <div className="bg-primary text-white p-3 rounded-2xl rounded-tr-none text-xs leading-relaxed shadow-sm">
           {cellRef != null && (
             <span className="inline-block rounded bg-white/20 px-1.5 py-0.5 text-[10px] font-medium mr-1.5 mb-0.5">
               @Cell {cellRef}
@@ -256,7 +270,7 @@ function ChatBubble({ message }: { message: UIMessage }) {
     );
   }
 
-  // Assistant message — render text parts + tool status indicators
+  // Assistant message
   const elements: React.ReactNode[] = [];
 
   for (let i = 0; i < message.parts.length; i++) {
@@ -275,33 +289,38 @@ function ChatBubble({ message }: { message: UIMessage }) {
         toolPart.toolName === "install_package" ||
         toolPart.type === "tool-install_package";
 
+      const isSaveDataset =
+        toolPart.toolName === "save_dataset" ||
+        toolPart.type === "tool-save_dataset";
+
       const isRunning =
         toolPart.state === "input-streaming" || toolPart.state === "input-available";
       const isDone = toolPart.state === "output-available";
       const isOk = isDone && (toolPart.output?.status === "ok" || toolPart.output?.success);
 
+      let label = "Executed Python";
+      if (isInstall) label = `pip install ${toolPart.input?.package ?? ""}`;
+      else if (isSaveDataset) label = `save_dataset ${(toolPart.input as Record<string, string>)?.filename ?? ""}`;
+
       elements.push(
         <div
           key={i}
-          className="flex items-center gap-1.5 px-2 py-1 rounded bg-gray-100 text-[10px] text-gray-500"
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-gray-200/70 text-[10px] text-gray-600"
         >
           {isRunning && <span className="text-yellow-500 animate-pulse">●</span>}
-          {isDone && isOk && <span className="text-green-500">✓</span>}
+          {isDone && isOk && <span className="text-emerald-500">✓</span>}
           {isDone && !isOk && <span className="text-red-500">✗</span>}
-          <span className="font-mono">
-            {isInstall
-              ? `pip install ${toolPart.input?.package ?? ""}`
-              : "Executed Python"}
-          </span>
+          <span className="font-mono">{label}</span>
         </div>
       );
     } else if (part.type === "text") {
       const text = (part as { text: string }).text.trim();
       if (!text) continue;
+
       elements.push(
         <div
           key={i}
-          className="rounded-xl px-3 py-2 text-xs bg-gray-50 text-gray-800 rounded-bl-sm border border-gray-100"
+          className="bg-slate-100 p-3 rounded-2xl rounded-tl-none text-xs leading-relaxed text-gray-800"
         >
           <CompactMarkdown content={text} />
         </div>
@@ -312,10 +331,8 @@ function ChatBubble({ message }: { message: UIMessage }) {
   if (elements.length === 0) return null;
 
   return (
-    <div className="flex justify-start">
-      <div className="max-w-[95%] space-y-1">
-        {elements}
-      </div>
+    <div className="flex flex-col gap-1 max-w-[85%]">
+      {elements}
     </div>
   );
 }
@@ -324,11 +341,11 @@ function ChatBubble({ message }: { message: UIMessage }) {
 
 function isToolPart(part: Record<string, unknown>): boolean {
   return (
-    part.type === "tool-execute_python" ||
-    part.type === "tool-install_package" ||
+    (typeof part.type === "string" && part.type.startsWith("tool-")) ||
     part.type === "dynamic-tool" ||
     part.toolName === "execute_python" ||
-    part.toolName === "install_package"
+    part.toolName === "install_package" ||
+    part.toolName === "save_dataset"
   );
 }
 
@@ -353,20 +370,20 @@ function CompactMarkdown({ content }: { content: string }) {
         code: ({ className, children }) => {
           if (className) {
             return (
-              <pre className="rounded bg-gray-900 p-2 overflow-x-auto text-[10px] text-green-300 font-mono my-1">
+              <pre className="rounded-lg bg-gray-900 p-2 overflow-x-auto text-[11px] text-emerald-400 font-mono my-1">
                 {String(children).replace(/\n$/, "")}
               </pre>
             );
           }
           return (
-            <code className="px-0.5 bg-gray-200 text-gray-800 rounded text-[10px] font-mono">
+            <code className="px-1 py-0.5 bg-gray-200 text-gray-800 rounded text-[10px] font-mono">
               {children}
             </code>
           );
         },
         pre: ({ children }) => <>{children}</>,
         a: ({ href, children }) => (
-          <a href={href} className="text-blue-600 hover:underline" target="_blank" rel="noopener noreferrer">
+          <a href={href} className="text-primary hover:underline" target="_blank" rel="noopener noreferrer">
             {children}
           </a>
         ),

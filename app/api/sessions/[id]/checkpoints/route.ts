@@ -21,6 +21,7 @@ export async function GET(
   const checkpoints = await prisma.checkpoint.findMany({
     where: { sessionId },
     orderBy: { createdAt: "asc" }, // chronological — oldest first for timeline
+    select: { id: true, name: true, description: true, createdAt: true },
   });
 
   return NextResponse.json(checkpoints);
@@ -40,6 +41,14 @@ export async function POST(
     return NextResponse.json({ error: "Checkpoint name is required" }, { status: 400 });
   }
 
+  if (name.trim().length > 200) {
+    return NextResponse.json({ error: "Checkpoint name too long (max 200 characters)" }, { status: 400 });
+  }
+
+  if (description && description.length > 1000) {
+    return NextResponse.json({ error: "Description too long (max 1,000 characters)" }, { status: 400 });
+  }
+
   // Verify session exists
   const session = await prisma.session.findUnique({ where: { id: sessionId } });
   if (!session) {
@@ -56,20 +65,17 @@ export async function POST(
   // so we can use it as the snapshot directory name
   const checkpointId = crypto.randomUUID();
 
-  // Create the on-disk snapshot (conversation JSON + output artifact copies)
-  const snapshotPath = await createCheckpointSnapshot(
-    checkpointId,
-    sessionId,
-    messages
-  );
+  // Create the on-disk snapshot (output artifacts only — messages go in DB)
+  const snapshotPath = await createCheckpointSnapshot(checkpointId, sessionId);
 
-  // Create the DB record
+  // Create the DB record with full message snapshot
   const checkpoint = await prisma.checkpoint.create({
     data: {
       id: checkpointId,
       sessionId,
       name: name.trim(),
       description: description?.trim() || null,
+      messagesSnapshot: JSON.parse(JSON.stringify(messages)),
       snapshotPath,
     },
   });
