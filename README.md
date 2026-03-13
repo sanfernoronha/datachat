@@ -1,36 +1,89 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DataChat
 
-## Getting Started
+AI-powered data analysis platform. Upload datasets, ask questions in natural language, and get Python-driven insights — all inside an interactive notebook with a chat panel.
 
-First, run the development server:
+## Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) (v2+)
+- An API key from a supported LLM provider
+
+## Quick Start
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+git clone <repo-url>
+cd datachat
+cp .env.example .env
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `.env` and add your API key. We recommend **Anthropic Claude** (default, best-tested for tool calling):
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```env
+MODEL_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Get a key at [console.anthropic.com](https://console.anthropic.com/). The default model is `claude-sonnet-4-6`.
 
-## Learn More
+<details>
+<summary>Using OpenAI or Google instead</summary>
 
-To learn more about Next.js, take a look at the following resources:
+```env
+# OpenAI
+MODEL_PROVIDER=openai
+OPENAI_API_KEY=sk-your-key-here
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+# Google
+MODEL_PROVIDER=google
+GOOGLE_API_KEY=your-key-here
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Only the key for your active `MODEL_PROVIDER` is required.
+</details>
 
-## Deploy on Vercel
+Then start everything:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+docker compose up
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+| Service     | Port | Description                              |
+|-------------|------|------------------------------------------|
+| **app**     | 3000 | Next.js web application                  |
+| **db**      | 5432 | PostgreSQL 15                            |
+| **sandbox** | 8888 | Jupyter kernel for code execution        |
+| **minio**   | 9000 | S3-compatible file storage               |
+
+Database migrations run automatically on first launch. Once ready, open **http://localhost:3000**.
+
+## Usage
+
+1. **Create a session** from the dashboard
+2. **Upload a CSV** (or Excel/TSV) in the left sidebar
+3. **Ask a question** in the chat — e.g. _"Describe the dataset"_ or _"Correlation analysis"_
+4. Watch the AI write and execute Python in the central notebook
+5. **Edit and re-run cells** with the Run button or `Shift+Enter`
+6. **Add your own cells** via the `+ Code` dividers between cells
+
+## Local Development
+
+Run the Next.js app outside Docker for faster iteration:
+
+```bash
+docker compose up db sandbox minio   # infrastructure only
+npm install
+npx prisma generate
+npx prisma migrate dev
+npm run dev
+```
+
+Uncomment the `DATABASE_URL` and `SANDBOX_URL` lines in your `.env` to point at localhost.
+
+## Troubleshooting
+
+**Sandbox not ready on first launch** — it can take 10-20s to start. If the first message fails, wait and retry.
+
+**Port conflicts** — edit the `ports` mapping in `docker-compose.yml` if 3000, 5432, 8888, or 9000 are taken.
+
+---
+
+Created by [@sanfernoronha](https://github.com/sanfernoronha)
